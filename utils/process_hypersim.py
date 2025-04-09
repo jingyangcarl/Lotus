@@ -50,10 +50,21 @@ def copy_images_and_depths(df, src_path, trg_path, filter_nan=False):
             os.makedirs(os.path.dirname(trg_normal_path), exist_ok=True)
             # os.makedirs(os.path.dirname(trg_normal_bump_path), exist_ok=True)
             
-            shutil.copy(src_image_path, trg_image_path)
-            shutil.copy(src_depth_path, trg_depth_path)
-            shutil.copy(src_normal_path, trg_normal_path)
-            # shutil.copy(src_normal_bump_path, trg_normal_bump_path)
+            # shutil.copy(src_image_path, trg_image_path)
+            # shutil.copy(src_depth_path, trg_depth_path)
+            # shutil.copy(src_normal_path, trg_normal_path)
+            ## shutil.copy(src_normal_bump_path, trg_normal_bump_path)
+            
+            def try_catch_copy(src, trg):
+                try:
+                    shutil.copy(src, trg)
+                except Exception as e:
+                    return False
+                return True
+            
+            try_catch_copy(src_image_path, trg_image_path)
+            try_catch_copy(src_depth_path, trg_depth_path)
+            try_catch_copy(src_normal_path, trg_normal_path)
             
             metadata.append({
                 "file_name": os.path.join(row['scene_name'], 'images', f'scene_{row["camera_name"]}_final_preview', image_file_name), 

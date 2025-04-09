@@ -17,7 +17,7 @@ export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
 
 # model configs
 export TIMESTEP=999
-export TASK_NAME="normal"
+export TASK_NAME="depth+normal"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -55,4 +55,5 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
+  --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest"

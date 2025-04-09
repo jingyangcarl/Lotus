@@ -3,14 +3,14 @@
 export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 
 # training dataset
-export TRAIN_DATA_DIR_HYPERSIM=$PATH_TO_HYPERSIM_DATA
-export TRAIN_DATA_DIR_VKITTI=$PATH_TO_VKITTI_DATA
+export TRAIN_DATA_DIR_HYPERSIM=/labworking/Users/jyang/data/hypersim/for_lotus
+export TRAIN_DATA_DIR_VKITTI=/labworking/Users_A-L/jyang/data/lotus/vkitti
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=0.9
+export P_HYPERSIM=1
 
 # training configs
-export BATCH_SIZE=16
+export BATCH_SIZE=8
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
@@ -27,7 +27,7 @@ export VAL_STEP=500
 # output dir
 export OUTPUT_DIR="output/train-lotus-d-${TASK_NAME}-bsz${TOTAL_BSZ}/"
 
-accelerate launch --config_file=accelerate_configs/$CUDA.yaml --mixed_precision="fp16" \
+accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13324" \
   train_lotus_d.py \
   --pretrained_model_name_or_path=$MODEL_NAME \

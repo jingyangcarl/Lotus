@@ -3,15 +3,15 @@
 export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 
 # training dataset
-export TRAIN_DATA_DIR_HYPERSIM=$PATH_TO_HYPERSIM_DATA
-export TRAIN_DATA_DIR_VKITTI=$PATH_TO_VKITTI_DATA
+export TRAIN_DATA_DIR_HYPERSIM=/labworking/Users/jyang/data/hypersim/for_lotus
+export TRAIN_DATA_DIR_VKITTI=/labworking/Users_A-L/jyang/data/lotus/vkitti
 export RES_HYPERSIM=576
 export RES_VKITTI=375
 export P_HYPERSIM=0.9
 export NORMTYPE="trunc_disparity"
 
 # training configs
-export BATCH_SIZE=16
+export BATCH_SIZE=8
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
@@ -56,4 +56,5 @@ accelerate launch --config_file=accelerate_configs/$CUDA.yaml --mixed_precision=
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
+  --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest"

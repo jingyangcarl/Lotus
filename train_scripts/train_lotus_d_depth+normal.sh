@@ -8,6 +8,7 @@ export TRAIN_DATA_DIR_VKITTI=/labworking/Users_A-L/jyang/data/lotus/vkitti
 export RES_HYPERSIM=576
 export RES_VKITTI=375
 export P_HYPERSIM=1
+export NORMTYPE="trunc_disparity"
 
 # training configs
 export BATCH_SIZE=8
@@ -17,7 +18,7 @@ export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
 
 # model configs
 export TIMESTEP=999
-export TASK_NAME="normal"
+export TASK_NAME="depth+normal"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -25,11 +26,11 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/train-lotus-g-${TASK_NAME}-bsz${TOTAL_BSZ}/"
+export OUTPUT_DIR="output/train-lotus-d-${TASK_NAME}-bsz${TOTAL_BSZ}_11/"
 
-accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision="fp16" \
-  --main_process_port="13226" \
-  train_lotus_g.py \
+accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
+  --main_process_port="13324" \
+  train_lotus_d.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \
   --resolution_hypersim=$RES_HYPERSIM \
@@ -38,6 +39,7 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --prob_hypersim=$P_HYPERSIM \
   --mix_dataset \
   --random_flip \
+  --norm_type=$NORMTYPE \
   --align_cam_normal \
   --dataloader_num_workers=0 \
   --train_batch_size=$BATCH_SIZE \
@@ -55,4 +57,5 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
+  --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest"

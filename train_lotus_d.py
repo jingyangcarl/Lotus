@@ -45,7 +45,7 @@ from datetime import timedelta
 from accelerate.utils import InitProcessGroupKwargs
 
 import diffusers
-from diffusers import AutoencoderKL, UNet2DConditionModel
+from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
@@ -141,12 +141,64 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     ).images[0]
                 
                 pred_annos.append(pred_normal)
-    
+                
+    elif task == "depth+normal":
+        tasks = ["depth", "normal"]
+        tasks_labels = [[0, 1], [1, 0]]
+        
+        for i in range(len(validation_images)):
+            if torch.backends.mps.is_available():
+                autocast_ctx = nullcontext()
+            else:
+                autocast_ctx = torch.autocast(accelerator.device.type)
+
+            with autocast_ctx:
+                # Preprocess validation image
+                validation_image = Image.open(validation_images[i]).convert("RGB")
+                input_images.append(validation_image)
+                validation_image = np.array(validation_image).astype(np.float32)
+                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
+                validation_image = validation_image / 127.5 - 1.0 
+                validation_image = validation_image.to(accelerator.device)
+                
+                for (task, task_label) in zip(tasks, tasks_labels):
+                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
+                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+                
+                    # Run
+                    if task == "depth":
+                        pred = pipeline(
+                            rgb_in=validation_image, 
+                            task_emb=task_emb,
+                            prompt="", 
+                            timesteps=[args.timestep],
+                            # output_type='np',
+                            generator=generator, 
+                            ).images[0]
+                        
+                        # pred = pred.mean(axis=-1)
+                        # is_reverse_color = "disparity" in args.norm_type
+                        # pred = colorize_depth_map(pred, reverse_color=is_reverse_color)
+                    elif task == "normal":
+                        pred = pipeline(
+                            rgb_in=validation_image, 
+                            task_emb=task_emb,
+                            prompt="", 
+                            timesteps=[args.timestep],
+                            generator=generator, 
+                            ).images[0]
+                    
+                    pred_annos.append(pred)
+            
+        # based on tasks, split the pred_annos lists based on the number of tasks
+        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
+        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
+        
     else:
         raise ValueError(f"Not Supported Task: {args.task_name}!")
     
     # Save output
-    save_output = concatenate_images(input_images, pred_annos)
+    save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
     save_dir = os.path.join(args.output_dir,'images')
     os.makedirs(save_dir, exist_ok=True)
     save_output.save(os.path.join(save_dir, f'{step:05d}.jpg'))
@@ -295,7 +347,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     run_example_validation(pipeline, task, args, step, accelerator, generator)
     
     # Run evaluation
-    run_evaluation(pipeline, task, args, step, accelerator)
+    # run_evaluation(pipeline, task, args, step, accelerator)
     
     del pipeline
     torch.cuda.empty_cache()
@@ -596,6 +648,14 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
+    
+    # add multitask loss weight
+    parser.add_argument(
+        "--loss_weight_string",
+        type=str,
+        default="1.0,1.0",
+        help="The loss weight for each task. "
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -702,6 +762,10 @@ def main():
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
+        # noise_scheduler = DDPMScheduler.from_pretrained(
+        #     args.pretrained_model_name_or_path, subfolder="scheduler", revision=args.revision, variant=args.variant
+        # )
+        
         text_encoder = CLIPTextModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
         )
@@ -975,9 +1039,22 @@ def main():
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-                rgb_latents = vae.encode(
-                    torch.cat((batch["pixel_values"],batch["pixel_values"]), dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
+                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
+                    # original
+                    rgb_latents = vae.encode(
+                        torch.cat((batch["pixel_values"],batch["pixel_values"]), dim=0).to(weight_dtype)
+                        ).latent_dist.sample()
+                elif args.task_name[0] == "depth+normal":
+                    tasks = args.task_name[0].split("+") # tasks = ['depth', 'normal']
+                    tasks_labels = [[0, 1], [1, 0], [0, 0]] # anno [depth, normal], rgb
+                    tasks_weights = args.loss_weight_string.split(",")
+                    tasks_weights = [float(i) for i in tasks_weights] # depth, normal
+                    assert len(tasks_weights) == len(tasks)
+                    rgb_latents = vae.encode(
+                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
+                        ).latent_dist.sample()
+                else:
+                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 rgb_latents = rgb_latents * vae.config.scaling_factor
 
                 # Convert target_annotations to latent space
@@ -986,16 +1063,28 @@ def main():
                     TAR_ANNO = "depth_values"
                 elif args.task_name[0] == "normal":
                     TAR_ANNO = "normal_values"
+                elif args.task_name[0] == "depth+normal":
+                    pass
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 
-                target_latents = vae.encode(
-                    torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
+                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
+                    # original
+                    target_latents = vae.encode(
+                        torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
                     ).latent_dist.sample()
+                    tasks_num = 1
+                elif args.task_name[0] == "depth+normal":
+                    target_latents = vae.encode(
+                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
+                    ).latent_dist.sample()
+                    tasks_num = len(tasks)
+                else:
+                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 target_latents = target_latents * vae.config.scaling_factor
                 
                 bsz = target_latents.shape[0]
-                bsz_per_task = int(bsz/2)
+                bsz_per_task = int(bsz/(tasks_num+1))
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
@@ -1013,42 +1102,82 @@ def main():
                 valid_mask_down_rgb = torch.ones_like(target_latents[bsz_per_task:]).to(target_latents.device).bool()
 
                 # Set timestep
-                timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
+                if args.timestep is None:
+                    timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
+                else:
+                    # Sample a random timestep for each image
+                    # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device)
+                    pass
                 timesteps = timesteps.long()
 
                 # Get the unet input
                 unet_input = rgb_latents
 
                 # Get the empty text embedding for conditioning
-                prompt = ""
-                text_inputs = tokenizer(
-                    prompt,
-                    padding="do_not_pad",
-                    max_length=tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                text_input_ids = text_inputs.input_ids.to(target_latents.device)
-                encoder_hidden_states = text_encoder(text_input_ids, return_dict=False)[0]
-                encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
+                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
+                    # original
+                    prompt = ""
+                    text_inputs = tokenizer(
+                        prompt,
+                        padding="do_not_pad",
+                        max_length=tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    text_input_ids = text_inputs.input_ids.to(target_latents.device)
+                    encoder_hidden_states = text_encoder(text_input_ids, return_dict=False)[0]
+                    encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
+                elif args.task_name[0] == "depth+normal":
+                    # original
+                    prompt = ""
+                    text_inputs = tokenizer(
+                        prompt,
+                        padding="do_not_pad",
+                        max_length=tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    text_input_ids = text_inputs.input_ids.to(target_latents.device)
+                    encoder_hidden_states = text_encoder(text_input_ids, return_dict=False)[0]
+                    encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
+                else:
+                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
 
                 # Get the target for loss
                 target = target_latents
 
                 # Get the task embedding
-                task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
-                task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
-                task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
-                task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
-                task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
+                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
+                    task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
+                    task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
+                    task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
+                    task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
+                    task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
+                elif args.task_name[0] == "depth+normal":
+                    def task_embedding(task_label):
+                        task_emb = torch.tensor(task_label).float().unsqueeze(0).to(accelerator.device)
+                        task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(bsz_per_task, 1)
+                        return task_emb
+                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
+                else:
+                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
 
                 # Predict
                 model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False,
                                   class_labels=task_emb)[0]
 
                 # Compute loss
-                anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
-                rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
+                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
+                    anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
+                    rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
+                elif args.task_name[0] == "depth+normal":
+                    anno_loss = 0.
+                    for i, task_weight in enumerate(tasks_weights):
+                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
+                        anno_loss += task_loss * task_weight
+                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
+                else:
+                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 loss = anno_loss + rgb_loss
                 
                 # Gather loss

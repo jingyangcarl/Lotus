@@ -302,7 +302,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     run_example_validation(pipeline, task, args, step, accelerator, generator)
 
     # Run evaluation
-    run_evaluation(pipeline, task, args, step, accelerator)
+    # run_evaluation(pipeline, task, args, step, accelerator)
 
     del pipeline
     torch.cuda.empty_cache()

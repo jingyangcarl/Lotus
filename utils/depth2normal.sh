@@ -2,7 +2,7 @@
 
 export PYTHONPATH=$PYTHONPATH:$PWD
 
-CUDA_VISIBLE_DEVICES=1 python utils/depth2normal.py \
-    --data_path $PATH_TO_VKITTI_DATA \
-    --batch_size 10 \
-    --scenes 01 02 06 18 20
+CUDA_VISIBLE_DEVICES=7 python utils/depth2normal.py \
+    --data_path /labworking/Users_A-L/jyang/data/lotus/vkitti \
+    --batch_size 20 \
+    --scenes 20
