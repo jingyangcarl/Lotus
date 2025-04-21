@@ -79,13 +79,16 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
     input_images = []
     
     timesteps = args.timestep
-    if isinstance(pipeline, LotusGPipeline):
+    num_inference_steps = 1
+    if isinstance(pipeline, LotusGMultistepsPipeline):
+        # LotusGMultistepsPipeline is derived from LotusGPipeline, therefore put it here before LotusGPipeline
+        timesteps = None
+        num_inference_steps = 50
+    elif isinstance(pipeline, LotusGPipeline):
         if args.timestep is None:
             raise ValueError("Please specify the timestep for the validation. Otherwise, the use LotusDMultistepPipeline.")
         else:
             timesteps = [args.timestep]
-    elif isinstance(pipeline, LotusGMultistepsPipeline):
-        timesteps = None
     else:
         raise ValueError("Not Supported Pipeline: %s" % pipeline)
 
@@ -113,7 +116,7 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     rgb_in=validation_image, 
                     task_emb=task_emb,
                     prompt="", 
-                    num_inference_steps=1, 
+                    num_inference_steps=num_inference_steps, 
                     timesteps=timesteps,
                     output_type='np',
                     generator=generator, 
@@ -150,7 +153,7 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     rgb_in=validation_image, 
                     task_emb=task_emb,
                     prompt="", 
-                    num_inference_steps=1, 
+                    num_inference_steps=num_inference_steps, 
                     timesteps=timesteps,
                     generator=generator,
                     ).images[0]
@@ -186,7 +189,7 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                             rgb_in=validation_image, 
                             task_emb=task_emb,
                             prompt="", 
-                            num_inference_steps=1, 
+                            num_inference_steps=num_inference_steps, 
                             timesteps=timesteps,
                             # output_type='np',
                             generator=generator, 
@@ -200,7 +203,7 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                             rgb_in=validation_image, 
                             task_emb=task_emb,
                             prompt="", 
-                            num_inference_steps=1, 
+                            num_inference_steps=num_inference_steps, 
                             timesteps=timesteps,
                             generator=generator, 
                             ).images[0]
@@ -939,6 +942,8 @@ def main():
         num_workers=args.dataloader_num_workers,
         pin_memory=True
         )
+    
+    train_dataset_lightstage = None
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
