@@ -1165,9 +1165,6 @@ class LotusDPipeline(DirectDiffusionPipeline):
     
 class LotusDMultistepsPipeline(DirectDiffusionPipeline):
     default_processing_resolution = 768
-    
-class LotusGMultistepsPipeline(DirectDiffusionPipeline):
-    default_processing_resolution = 768
 
 class LotusGPipeline(DirectDiffusionPipeline):
     default_processing_resolution = 768
@@ -1285,7 +1282,10 @@ class LotusGPipeline(DirectDiffusionPipeline):
         )
 
         # 4. Prepare timesteps
-        timesteps = torch.tensor(timesteps, device=device).long()
+        if timesteps is None:
+            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        else:
+            timesteps = torch.tensor(timesteps, device=device).long()
     
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels // 2
@@ -1364,3 +1364,6 @@ class LotusGPipeline(DirectDiffusionPipeline):
             return (image, has_nsfw_concept, latents)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    
+class LotusGMultistepsPipeline(LotusGPipeline):
+    default_processing_resolution = 768

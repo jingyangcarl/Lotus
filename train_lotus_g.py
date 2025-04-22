@@ -57,6 +57,7 @@ from pipeline import LotusGPipeline, LotusGMultistepsPipeline
 from utils.image_utils import concatenate_images, colorize_depth_map
 from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
 from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
+from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
 
 from eval import evaluation_depth, evaluation_normal
 
@@ -475,9 +476,28 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--resolution_lightstage",
+        type=int,
+        default=512,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+    parser.add_argument(
         "--prob_hypersim",
         type=float,
         default=0.9,
+    )
+    parser.add_argument(
+        "--prob_vkitti",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--prob_lightstage",
+        type=float,
+        default=0.1,
     )
     parser.add_argument(
         "--mix_dataset",
@@ -943,7 +963,16 @@ def main():
         pin_memory=True
         )
     
-    train_dataset_lightstage = None
+    # -------------------- Dataset3: Lightstage --------------------
+    train_dataset_lightstage = LightstageDataset()
+    train_dataloader_lightstage = torch.utils.data.DataLoader(
+        train_dataset_lightstage,
+        shuffle=True,
+        collate_fn=collate_fn_lightstage,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=True
+    )
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -961,8 +990,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler
+    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler
     )
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1005,8 +1034,12 @@ def main():
     logger.info("***** Running training *****")
     logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
+    logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
+    logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
+    logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
+    assert args.prob_hypersim + args.prob_vkitti + args.prob_lightstage <= 1+1e-8, "sum of probability of all datasets should less than 1."
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1071,6 +1104,7 @@ def main():
     for epoch in range(first_epoch, args.num_train_epochs):
         iter_hypersim = iter(train_dataloader_hypersim)
         iter_vkitti = iter(train_dataloader_vkitti)
+        iter_lightstage = iter(train_dataloader_lightstage)
 
         train_loss = 0.0
         log_ann_loss = 0.0
@@ -1078,9 +1112,10 @@ def main():
 
         for _ in range(len(train_dataloader_hypersim)):
             if args.mix_dataset:
-                if random.random() < args.prob_hypersim:
+                prob_dataset = random.random()
+                if prob_dataset < args.prob_hypersim:
                     batch = next(iter_hypersim)
-                else:
+                elif prob_dataset < args.prob_hypersim + args.prob_vkitti:
                     # Important note:
                     # In our training process, the Hypersim dataset is larger than the VKITTI dataset
                     # Therefore, when the smaller VKITTI dataset is exhausted, we need to restart iterating from the beginning
@@ -1089,6 +1124,12 @@ def main():
                     except StopIteration:
                         iter_vkitti = iter(train_dataloader_vkitti)
                         batch = next(iter_vkitti)
+                else:
+                    try:
+                        batch = next(iter_lightstage)
+                    except StopIteration:
+                        iter_lightstage = iter(train_dataloader_lightstage)
+                        batch = next(iter_lightstage)
             else:
                 batch = next(iter_hypersim)
 
