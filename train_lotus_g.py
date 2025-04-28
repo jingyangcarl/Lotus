@@ -25,6 +25,8 @@ from pathlib import Path
 from PIL import Image
 from glob import glob
 from easydict import EasyDict
+import itertools
+import time
 
 import accelerate
 import datasets
@@ -58,6 +60,7 @@ from utils.image_utils import concatenate_images, colorize_depth_map
 from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
 from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
 from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
+from utils.shiq_dataset import get_SHIQ10825_dataset
 
 from eval import evaluation_depth, evaluation_normal
 
@@ -211,6 +214,54 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     
                     pred_annos.append(pred)
             
+        # based on tasks, split the pred_annos lists based on the number of tasks
+        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
+        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
+        
+    elif task == "brdf":
+        tasks = ['albedo', 'normal', 'specular', 'sigma', 'depth']
+        num_tasks = len(tasks) + 1  # including RGB
+        
+        # Generate evenly spaced points in [0, 2pi]^2
+        grid_size = math.ceil(math.sqrt(num_tasks))
+        linspace = torch.linspace(0, 2 * math.pi, grid_size)
+        all_coords = list(itertools.product(linspace, linspace))
+        assert len(all_coords) >= num_tasks, "Grid is too small to assign unique labels"
+        
+        # Take the first N task labels
+        tasks_labels = [list(map(float, all_coords[i])) for i in range(num_tasks)]
+        
+        for i in range(len(validation_images)):
+            if torch.backends.mps.is_available():
+                autocast_ctx = nullcontext()
+            else:
+                autocast_ctx = torch.autocast(accelerator.device.type)
+
+            with autocast_ctx:
+                # Preprocess validation image
+                validation_image = Image.open(validation_images[i]).convert("RGB")
+                input_images.append(validation_image)
+                validation_image = np.array(validation_image).astype(np.float32)
+                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
+                validation_image = validation_image / 127.5 - 1.0 
+                validation_image = validation_image.to(accelerator.device)
+                
+                for (task, task_label) in zip(tasks, tasks_labels):
+                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
+                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+                
+                    # Run
+                    pred = pipeline(
+                        rgb_in=validation_image, 
+                        task_emb=task_emb,
+                        prompt="", 
+                        num_inference_steps=num_inference_steps, 
+                        timesteps=timesteps,
+                        generator=generator, 
+                        ).images[0]
+                    
+                    pred_annos.append(pred)
+                    
         # based on tasks, split the pred_annos lists based on the number of tasks
         # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
         pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
@@ -419,6 +470,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--train_data_dir_shiq10825",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the training data for vkitti"
+        ),
+    )
+    parser.add_argument(
         "--max_train_samples",
         type=int,
         default=None,
@@ -491,6 +550,11 @@ def parse_args():
     )
     parser.add_argument(
         "--prob_vkitti",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--prob_shiq10825",
         type=float,
         default=0.0,
     )
@@ -933,6 +997,7 @@ def main():
 
     # Get the datasets and dataloaders.
     # -------------------- Dataset1: Hypersim --------------------
+    tik = time.time()
     train_hypersim_dataset, preprocess_train_hypersim, collate_fn_hypersim = get_hypersim_dataset_depth_normal(
         args.train_data_dir_hypersim, args.resolution_hypersim, args.random_flip, 
         norm_type=args.norm_type, truncnorm_min=args.truncnorm_min, align_cam_normal=args.align_cam_normal
@@ -951,7 +1016,10 @@ def main():
         num_workers=args.dataloader_num_workers,
         pin_memory=True
     )
+    print("Loading hypersim dataset takes: ", time.time()-tik)
+    
     # -------------------- Dataset2: VKITTI --------------------
+    tik = time.time()
     transform_vkitti = VKITTITransform(random_flip=args.random_flip)
     train_dataset_vkitti = VKITTIDataset(args.train_data_dir_vkitti, transform_vkitti, args.norm_type, truncnorm_min=args.truncnorm_min)
     train_dataloader_vkitti = torch.utils.data.DataLoader(
@@ -961,9 +1029,28 @@ def main():
         batch_size=args.train_batch_size, 
         num_workers=args.dataloader_num_workers,
         pin_memory=True
-        )
+    )
+    print("Loading vkitti dataset takes: ", time.time()-tik)
     
-    # -------------------- Dataset3: Lightstage --------------------
+    # -------------------- Dataset3: SHIQ10825 --------------------
+    # https://github.com/fu123456/SHIQ/tree/main
+    tik = time.time()
+    train_dataset_shiq10825, preprocess_train_shiq10825, collate_fn_shiq10825 = get_SHIQ10825_dataset(
+        args.train_data_dir_shiq10825
+    )
+    train_dataset_shiq10825 = train_dataset_shiq10825.with_transform(preprocess_train_shiq10825)
+    train_dataloader_shiq10825 = torch.utils.data.DataLoader(
+        train_dataset_shiq10825,
+        shuffle=True,
+        collate_fn=collate_fn_shiq10825,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=True
+    )
+    print("Loading shiq10825 dataset takes: ", time.time()-tik)
+    
+    # -------------------- Dataset4: Lightstage --------------------
+    tik = time.time()
     train_dataset_lightstage = LightstageDataset()
     train_dataloader_lightstage = torch.utils.data.DataLoader(
         train_dataset_lightstage,
@@ -973,6 +1060,7 @@ def main():
         num_workers=args.dataloader_num_workers,
         pin_memory=True
     )
+    print("Loading lightstage dataset takes: ", time.time()-tik)
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -990,8 +1078,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler
+    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_lightstage, lr_scheduler
     )
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1038,8 +1126,9 @@ def main():
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
     logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
+    logger.info(f"  Dataset alternation probability of SHIQ10825 = {args.prob_shiq10825}")
     logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
-    assert args.prob_hypersim + args.prob_vkitti + args.prob_lightstage <= 1+1e-8, "sum of probability of all datasets should less than 1."
+    assert args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage <= 1+1e-8, "sum of probability of all datasets should less than 1."
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1047,6 +1136,7 @@ def main():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Unet timestep = {args.timestep}")
     logger.info(f"  Task name: {args.task_name}")
+    logger.info(f"  Task Loss Weights: {args.loss_weight_string}")
     logger.info(f"  Is Full Evaluation?: {args.FULL_EVALUATION}")
     logger.info(f"Output Workspace: {args.output_dir}")
 
@@ -1104,6 +1194,7 @@ def main():
     for epoch in range(first_epoch, args.num_train_epochs):
         iter_hypersim = iter(train_dataloader_hypersim)
         iter_vkitti = iter(train_dataloader_vkitti)
+        iter_shiq10825 = iter(train_dataloader_shiq10825)
         iter_lightstage = iter(train_dataloader_lightstage)
 
         train_loss = 0.0
@@ -1124,6 +1215,12 @@ def main():
                     except StopIteration:
                         iter_vkitti = iter(train_dataloader_vkitti)
                         batch = next(iter_vkitti)
+                elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825:
+                    try:
+                        batch = next(iter_shiq10825)
+                    except StopIteration:
+                        iter_shiq10825 = iter(train_dataloader_shiq10825)
+                        batch = next(iter_shiq10825)
                 else:
                     try:
                         batch = next(iter_lightstage)
@@ -1149,6 +1246,30 @@ def main():
                     rgb_latents = vae.encode(
                         torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
                         ).latent_dist.sample()
+                elif args.task_name[0] == "brdf":
+                    tasks = ['albedo', 'normal', 'specular', 'sigma', 'depth']
+                    num_tasks = len(tasks) + 1  # including RGB
+                    
+                    # Generate evenly spaced points in [0, 2pi]^2
+                    grid_size = math.ceil(math.sqrt(num_tasks))
+                    linspace = torch.linspace(0, 2 * math.pi, grid_size)
+                    all_coords = list(itertools.product(linspace, linspace))
+                    assert len(all_coords) >= num_tasks, "Grid is too small to assign unique labels"
+                    
+                    # Take the first N task labels
+                    tasks_labels = [list(map(float, all_coords[i])) for i in range(num_tasks)]
+                    # last one is RGB
+                    rgb_label = tasks_labels[-1]
+                    task_labels_map = dict(zip(tasks, tasks_labels[:-1]))
+                    
+                    # fill tasks with all 1s
+                    # tasks_weights = [1.0] * len(tasks)
+                    tasks_weights = args.loss_weight_string.split(",")
+                    tasks_weights = [float(i) for i in tasks_weights] # 'albedo', 'normal', 'specular', 'sigma', 'depth'
+                    
+                    rgb_latents = vae.encode(
+                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
+                        ).latent_dist.sample()
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 rgb_latents = rgb_latents * vae.config.scaling_factor
@@ -1160,6 +1281,8 @@ def main():
                     TAR_ANNO = "normal_values"
                 elif args.task_name[0] == "depth+normal":
                     pass
+                elif args.task_name[0] == "brdf":
+                    pass
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 
@@ -1170,6 +1293,18 @@ def main():
                     ).latent_dist.sample()
                     tasks_num = 1
                 elif args.task_name[0] == "depth+normal":
+                    target_latents = vae.encode(
+                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
+                    ).latent_dist.sample()
+                    tasks_num = len(tasks)
+                elif args.task_name[0] == "brdf":
+                    
+                    # assign the missing part
+                    for task in tasks:
+                        if f'{task}_values' not in batch:
+                            batch[f'{task}_values'] = torch.zeros_like(batch["pixel_values"])
+                            tasks_weights[tasks.index(task)] = 0.0
+                    
                     target_latents = vae.encode(
                         torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
                     ).latent_dist.sample()
@@ -1252,6 +1387,10 @@ def main():
                 target = target_latents
 
                 # Get the task embedding
+                def task_embedding(task_label):
+                    task_emb = torch.tensor(task_label).float().unsqueeze(0).to(accelerator.device)
+                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(bsz_per_task, 1)
+                    return task_emb
                 if args.task_name[0] == "depth" or args.task_name[0] == "normal":
                     task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
                     task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
@@ -1259,10 +1398,8 @@ def main():
                     task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
                     task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
                 elif args.task_name[0] == "depth+normal":
-                    def task_embedding(task_label):
-                        task_emb = torch.tensor(task_label).float().unsqueeze(0).to(accelerator.device)
-                        task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(bsz_per_task, 1)
-                        return task_emb
+                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
+                elif args.task_name[0] == "brdf":
                     task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
@@ -1281,6 +1418,16 @@ def main():
                         task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
                         anno_loss += task_loss * task_weight
                     rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
+                elif args.task_name[0] == "brdf":
+                    anno_loss = 0.
+                    tasks_loss = {}
+                    for i, (task_weight, task) in enumerate(zip(tasks_weights, tasks)):
+                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
+                        tasks_loss[task] = task_loss
+                        anno_loss += task_loss * task_weight
+                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
+                    
+                    # depth2normal loss?
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 loss = anno_loss + rgb_loss
