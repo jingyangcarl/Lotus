@@ -7,15 +7,16 @@ import socket
 from scipy.spatial.transform import Rotation as R
 import torch
 import json
-from tqdm import tqdm
+from tqdm.rich import tqdm
 from torchvision import transforms
+import cv2
 
 class LightstageTransform:
     pass
 
 class LightstageDataset(Dataset):
 
-    def __init__(self, ):
+    def __init__(self):
         
         v = 'v1.3'
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_half.json'
@@ -48,6 +49,7 @@ class LightstageDataset(Dataset):
         self.omega_i = []
         self.windows = []
         
+        print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
         for _, row in enumerate(tqdm(metadata, desc='loading metadata')):
             
             if row['l'] <= 1 or row['l'] >= 348:
@@ -58,28 +60,23 @@ class LightstageDataset(Dataset):
             self.objs.append(row["obj"])
             
             camera_path = os.path.join(self.cam_dir, f'camera{row["cam"]:02d}.txt')
-            assert os.path.isfile(camera_path), f'{camera_path} is not valid'
-            
             static_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static', f'{row["i"]}_{row["j"]}.exr')
-            assert os.path.isfile(static_path), f'{static_path} is not valid'
-
             cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.exr')
-            assert os.path.isfile(cross_path), f'{cross_path} is not valid'
-
             parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.exr')
-            assert os.path.isfile(parallel_path), f'{parallel_path} is not valid'
-
             albedo_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'albedo', f'{row["i"]}_{row["j"]}.exr')
-            assert os.path.isfile(albedo_path), f'{albedo_path} is not valid'
-
             normal_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'normal', f'{row["i"]}_{row["j"]}.exr')
-            assert os.path.isfile(normal_path), f'{normal_path} is not valid'
-
             specular_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'specular', f'{row["i"]}_{row["j"]}.exr')
-            assert os.path.isfile(specular_path), f'{specular_path} is not valid'
-
             sigma_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'sigma', f'{row["i"]}_{row["j"]}.exr')
-            assert os.path.isfile(sigma_path), f'{sigma_path} is not valid'
+            
+            # check if the paths are valid, 42k examples took 2min, remove from this and add a preprocess check
+            # assert os.path.isfile(camera_path), f'{camera_path} is not valid'
+            # assert os.path.isfile(static_path), f'{static_path} is not valid'
+            # assert os.path.isfile(cross_path), f'{cross_path} is not valid'
+            # assert os.path.isfile(parallel_path), f'{parallel_path} is not valid'
+            # assert os.path.isfile(albedo_path), f'{albedo_path} is not valid'
+            # assert os.path.isfile(normal_path), f'{normal_path} is not valid'
+            # assert os.path.isfile(specular_path), f'{specular_path} is not valid'
+            # assert os.path.isfile(sigma_path), f'{sigma_path} is not valid'
 
             self.camera_paths.append(camera_path)
             self.static_paths.append(static_path)
@@ -102,6 +99,7 @@ class LightstageDataset(Dataset):
                 # transforms.ToPILImage(),
             ]
         )
+        self.tonemap = cv2.createTonemap(gamma=2.2)
             
     def __len__(self):
         return len(self.texts)
@@ -479,6 +477,25 @@ class LightstageDataset(Dataset):
         specular = imageio.imread(specular_path)
         sigma = imageio.imread(sigma_path)
         
+        # hdr to ldr via Apply simple Reinhard tone mapping
+        # static = self.tonemap.process(static)
+        static = static.clip(0, 1)
+        cross = cross.clip(0, 1)
+        parallel = parallel.clip(0, 1)
+        albedo = albedo.clip(0, 1)
+        normal = normal.clip(0, 1)
+        specular = specular.clip(0, 1)
+        sigma = sigma.clip(0, 1) / 10. # the decomposition used 10 as a clipping factor
+        
+        # remove nan and inf values
+        static = np.nan_to_num(static)
+        cross = np.nan_to_num(cross)
+        parallel = np.nan_to_num(parallel)
+        albedo = np.nan_to_num(albedo)
+        normal = np.nan_to_num(normal)
+        specular = np.nan_to_num(specular)
+        sigma = np.nan_to_num(sigma)
+        
         # apply transforms
         static = self.transforms(static)
         cross = self.transforms(cross)
@@ -494,7 +511,7 @@ class LightstageDataset(Dataset):
         example['parallel_value'] = parallel
         example['albedo_value'] = albedo
         example['normal_value'] = normal
-        example['specular_value'] = specular
+        example['specular_value'] = specular.repeat(3, 1, 1) # repeat to 3 channels
         example['sigma_value'] = sigma
         
         return example
@@ -539,8 +556,7 @@ def collate_fn_lightstage(examples):
         "albedo_values": albedo_values,
         "normal_values": normal_values,
         "specular_values": specular_values,
-        # "sigma_values": sigma_values,
-        "depth_values": sigma_values,
+        "sigma_values": sigma_values,
         # paths
         "static_pathes": static_pathes,
         "cross_pathes": cross_pathes,
