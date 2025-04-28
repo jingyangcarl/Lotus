@@ -26,7 +26,8 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/train-lotus-d-${TASK_NAME}-bsz${TOTAL_BSZ}_11/"
+# export OUTPUT_DIR="output/train-lotus-d-${TASK_NAME}-bsz${TOTAL_BSZ}_11/"
+export OUTPUT_DIR="output/debug/debugging"
 
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13324" \
@@ -57,5 +58,6 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
+  --loss_weight_string=1.0,1.0 \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest"

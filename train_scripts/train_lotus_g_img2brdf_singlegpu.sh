@@ -5,15 +5,17 @@ export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 # training dataset
 export TRAIN_DATA_DIR_HYPERSIM=/labworking/Users/jyang/data/hypersim/for_lotus
 export TRAIN_DATA_DIR_VKITTI=/labworking/Users_A-L/jyang/data/lotus/vkitti
+export TRAIN_DATA_DIR_SHIQ10825=/labworking/Users/jyang/data/shiq/SHIQ_data_10825/SHIQ_data_10825
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=0.3
-export P_VKITTI=0.2
-export P_LS=0.5
+export P_HYPERSIM=0.0
+export P_VKITTI=0.0
+export P_SHIQ10825=1.0
+export P_LS=0.0
 export NORMTYPE="trunc_disparity"
 
 # training configs
-export BATCH_SIZE=8
+export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
@@ -23,6 +25,7 @@ export TIMESTEP=999
 # export PIPELINE="LotusGPipeline"
 export PIPELINE="LotusGMultistepsPipeline"
 export TASK_NAME="brdf"
+export LW_task="1.0,0.0,1.0,0.0,0.0"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -30,10 +33,10 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/train-${PIPELINE}-${TASK_NAME}-bsz${TOTAL_BSZ}_L11111_prob325/"
+export OUTPUT_DIR="output/train-${PIPELINE}-${TASK_NAME}-bsz${TOTAL_BSZ}_L10100_probHVSL0010/"
 # export OUTPUT_DIR="output/debug/debugging"
 
-accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision="fp16" \
+accelerate launch --mixed_precision="fp16" \
   --main_process_port="13227" \
   train_lotus_g.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
@@ -41,9 +44,11 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --resolution_hypersim=$RES_HYPERSIM \
   --train_data_dir_vkitti=$TRAIN_DATA_DIR_VKITTI \
   --resolution_vkitti=$RES_VKITTI \
+  --train_data_dir_shiq10825=$TRAIN_DATA_DIR_SHIQ10825 \
   --prob_hypersim=$P_HYPERSIM \
   --prob_vkitti=$P_VKITTI \
   --prob_lightstage=$P_LS \
+  --prob_shiq10825=$P_SHIQ10825 \
   --mix_dataset \
   --random_flip \
   --norm_type=$NORMTYPE \
@@ -58,7 +63,7 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --learning_rate=3e-05 \
   --lr_scheduler="constant" --lr_warmup_steps=0 \
   --task_name=$TASK_NAME \
-  --loss_weight_string=1.0,1.0,1.0,1.0,1.0 \
+  --loss_weight_string=$LW_task \
   --timestep=$TIMESTEP \
   --pipeline=$PIPELINE \
   --validation_images=$VALIDATION_IMAGES \
