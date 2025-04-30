@@ -218,6 +218,44 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
         # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
         pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
         
+    elif task == 'diffuse+specular':
+        tasks = ['diffuse', 'specular']
+        tasks_labels = [[0, 1], [1, 0]]
+        
+        for i in range(len(validation_images)):
+            if torch.backends.mps.is_available():
+                autocast_ctx = nullcontext()
+            else:
+                autocast_ctx = torch.autocast(accelerator.device.type)
+
+            with autocast_ctx:
+                # Preprocess validation image
+                validation_image = Image.open(validation_images[i]).convert("RGB")
+                input_images.append(validation_image)
+                validation_image = np.array(validation_image).astype(np.float32)
+                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
+                validation_image = validation_image / 127.5 - 1.0 
+                validation_image = validation_image.to(accelerator.device)
+                
+                for (task, task_label) in zip(tasks, tasks_labels):
+                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
+                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+                
+                    # Run
+                    pred = pipeline(
+                        rgb_in=validation_image, 
+                        task_emb=task_emb,
+                        prompt="", 
+                        num_inference_steps=num_inference_steps, 
+                        timesteps=timesteps,
+                        generator=generator, 
+                        ).images[0]
+                    
+                    pred_annos.append(pred)
+        # based on tasks, split the pred_annos lists based on the number of tasks
+        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
+        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
+        
     elif task == "brdf":
         tasks = ['albedo', 'normal', 'specular', 'sigma', 'depth']
         num_tasks = len(tasks) + 1  # including RGB
@@ -427,6 +465,72 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     del pipeline
     torch.cuda.empty_cache()
+    
+def save_combined_task_images_gt_pred(model_pred, target, batch, tasks, available_values,
+                               vae, args, global_step, bsz_per_task):
+    """
+    Decode and save a single combined image comparing predictions and ground truths across multiple tasks.
+
+    Args:
+        model_pred (Tensor): Latent predictions for all tasks.
+        target (Tensor): Ground truth latents for all tasks.
+        batch (dict): Input batch containing ground truth task values.
+        tasks (list): List of task names.
+        available_values (dict): Availability mask per task.
+        vae (nn.Module): VAE model with config.scaling_factor, post_quant_conv, and decoder.
+        args (Namespace): Contains output_dir for saving images.
+        global_step (int): Training step for naming outputs.
+        bsz_per_task (int): Batch size per task.
+    """
+    def decode(latent: torch.Tensor, return_mean=False) -> torch.Tensor:
+        # Ensure latent is in the same dtype as the model
+        latent = latent.to(dtype=vae.post_quant_conv.weight.dtype)
+        latent = latent / vae.config.scaling_factor
+        z = vae.post_quant_conv(latent)
+        stacked = vae.decoder(z)
+        return stacked.mean(dim=1, keepdim=True) if return_mean else stacked
+
+    def save_image(image, path_save, name):
+        image = image.to('cpu').detach().numpy()
+        image = image[0, :3, ...]
+        image = np.transpose(image, (1, 2, 0))
+        image = (image * 255).astype(np.uint8)
+        image = Image.fromarray(image)
+        image.save(os.path.join(path_save, f'{name}.png'))
+
+    # Create output directory
+    validate_path = os.path.join(args.output_dir, 'training')
+    os.makedirs(validate_path, exist_ok=True)
+
+    all_pred_images = []
+    all_gt_images = []
+    all_latent_preds = []
+    all_latent_gts = []
+
+    for i, task in enumerate(tasks):
+        if available_values.get(task, False):
+            start_idx = bsz_per_task * i
+            end_idx = bsz_per_task * (i + 1)
+
+            latent_pred = model_pred[start_idx:end_idx]
+            latent_gt = target[start_idx:end_idx]
+
+            img_pred = decode(latent_pred, return_mean=False)
+            img_gt = batch[f"{task}_values"]
+
+            all_pred_images.append(img_pred)
+            all_gt_images.append(img_gt)
+            all_latent_preds.append(latent_pred)
+            all_latent_gts.append(latent_gt)
+
+    if all_pred_images:
+        combined_pred = torch.cat(all_pred_images, dim=2)
+        combined_gt = torch.cat(all_gt_images, dim=2)
+        combined_latent_pred = torch.cat(all_latent_preds, dim=2)
+        combined_latent_gt = torch.cat(all_latent_gts, dim=2)
+
+        save_image(torch.cat((combined_pred, combined_gt), dim=3).float(), validate_path, f'{global_step}_combined')
+        save_image(torch.cat((combined_latent_pred, combined_latent_gt), dim=3).float(), validate_path, f'{global_step}_latent_combined')
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -1122,6 +1226,7 @@ def main():
     logger.info("***** Running training *****")
     logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
+    logger.info(f"  Num examples SHIQ10825 = {len(train_dataset_shiq10825)}")
     logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
@@ -1190,6 +1295,27 @@ def main():
             weight_dtype,
             global_step,
         )
+        pass
+    
+    batch_count_datasets = {
+        "total": 0,
+        "hypersim": 0,
+        "vkitti": 0,
+        "shiq10825": 0,
+        "lightstage": 0,
+    }
+    def get_prob_datasets_dynamic(name):
+        batch_count_datasets["total"] += 1
+        batch_count_datasets[name] += 1
+        
+        # get formated count/total string
+        prob_str = ""
+        for dataset_name, count in batch_count_datasets.items():
+            if dataset_name == "total":
+                continue
+            prob_str += f"{dataset_name[:2].upper()}: {count/batch_count_datasets['total']:.2f} "
+        
+        return prob_str
             
     for epoch in range(first_epoch, args.num_train_epochs):
         iter_hypersim = iter(train_dataloader_hypersim)
@@ -1204,8 +1330,10 @@ def main():
         for _ in range(len(train_dataloader_hypersim)):
             if args.mix_dataset:
                 prob_dataset = random.random()
+                dataset_name = ''
                 if prob_dataset < args.prob_hypersim:
                     batch = next(iter_hypersim)
+                    dataset_name = 'hypersim'
                 elif prob_dataset < args.prob_hypersim + args.prob_vkitti:
                     # Important note:
                     # In our training process, the Hypersim dataset is larger than the VKITTI dataset
@@ -1215,18 +1343,24 @@ def main():
                     except StopIteration:
                         iter_vkitti = iter(train_dataloader_vkitti)
                         batch = next(iter_vkitti)
+                    dataset_name = 'vkitti'
                 elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825:
                     try:
                         batch = next(iter_shiq10825)
                     except StopIteration:
                         iter_shiq10825 = iter(train_dataloader_shiq10825)
                         batch = next(iter_shiq10825)
-                else:
+                    dataset_name = 'shiq10825'
+                elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage:
                     try:
                         batch = next(iter_lightstage)
                     except StopIteration:
                         iter_lightstage = iter(train_dataloader_lightstage)
                         batch = next(iter_lightstage)
+                    dataset_name = 'lightstage'
+                else:
+                    raise ValueError("The dataset probability is not valid.")
+                progress_bar.set_description_str(f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}")
             else:
                 batch = next(iter_hypersim)
 
@@ -1242,6 +1376,15 @@ def main():
                     tasks_labels = [[0, 1], [1, 0], [0, 0]] # anno [depth, normal], rgb
                     tasks_weights = args.loss_weight_string.split(",")
                     tasks_weights = [float(i) for i in tasks_weights] # depth, normal
+                    assert len(tasks_weights) == len(tasks)
+                    rgb_latents = vae.encode(
+                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
+                        ).latent_dist.sample()
+                elif args.task_name[0] == 'diffuse+specular':
+                    tasks = args.task_name[0].split("+")
+                    tasks_labels = [[0, 1], [1, 0], [0, 0]] # anno [diffuse, specular], rgb
+                    tasks_weights = args.loss_weight_string.split(",")
+                    tasks_weights = [float(i) for i in tasks_weights] # diffuse, specular
                     assert len(tasks_weights) == len(tasks)
                     rgb_latents = vae.encode(
                         torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
@@ -1281,6 +1424,8 @@ def main():
                     TAR_ANNO = "normal_values"
                 elif args.task_name[0] == "depth+normal":
                     pass
+                elif args.task_name[0] == "diffuse+specular":
+                    pass
                 elif args.task_name[0] == "brdf":
                     pass
                 else:
@@ -1297,13 +1442,32 @@ def main():
                         torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
                     ).latent_dist.sample()
                     tasks_num = len(tasks)
-                elif args.task_name[0] == "brdf":
-                    
+                elif args.task_name[0] == "diffuse+specular":
                     # assign the missing part
+                    available_values = {}
                     for task in tasks:
                         if f'{task}_values' not in batch:
                             batch[f'{task}_values'] = torch.zeros_like(batch["pixel_values"])
                             tasks_weights[tasks.index(task)] = 0.0
+                            available_values[task] = False
+                        else:
+                            available_values[task] = True
+                    
+                    target_latents = vae.encode(
+                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
+                    ).latent_dist.sample()
+                    tasks_num = len(tasks)
+                elif args.task_name[0] == "brdf":
+                    
+                    # assign the missing part
+                    available_values = {}
+                    for task in tasks:
+                        if f'{task}_values' not in batch:
+                            batch[f'{task}_values'] = torch.zeros_like(batch["pixel_values"])
+                            tasks_weights[tasks.index(task)] = 0.0
+                            available_values[task] = False
+                        else:
+                            available_values[task] = True
                     
                     target_latents = vae.encode(
                         torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
@@ -1399,6 +1563,8 @@ def main():
                     task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
                 elif args.task_name[0] == "depth+normal":
                     task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
+                elif args.task_name[0] == "diffuse+specular":
+                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
                 elif args.task_name[0] == "brdf":
                     task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
                 else:
@@ -1416,6 +1582,14 @@ def main():
                     anno_loss = 0.
                     for i, task_weight in enumerate(tasks_weights):
                         task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
+                        anno_loss += task_loss * task_weight
+                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
+                elif args.task_name[0] == "diffuse+specular":
+                    anno_loss = 0.
+                    tasks_loss = {}
+                    for i, (task_weight, task) in enumerate(zip(tasks_weights, tasks)):
+                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
+                        tasks_loss[task] = task_loss
                         anno_loss += task_loss * task_weight
                     rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
                 elif args.task_name[0] == "brdf":
@@ -1495,6 +1669,19 @@ def main():
                         logger.info(f"Saved state to {save_path}")
                 
                     if args.validation_images is not None and global_step % validation_steps == 0:
+                        
+                        save_combined_task_images_gt_pred(
+                            model_pred=model_pred,
+                            target=target,
+                            batch=batch,
+                            tasks=tasks,
+                            available_values=available_values,
+                            vae=vae,
+                            args=args,
+                            global_step=global_step,
+                            bsz_per_task=bsz_per_task
+                        )
+                    
                         log_validation(
                             vae,
                             text_encoder,
@@ -1505,6 +1692,7 @@ def main():
                             weight_dtype,
                             global_step,
                         )
+                        
 
             if global_step >= args.max_train_steps:
                 break
