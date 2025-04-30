@@ -7,7 +7,7 @@ import torch
 
 def get_PSD_dataset(data_dir, split='train'):
     
-    split_dir = os.path.join(data_dir, split)
+    split_dir = os.path.join(data_dir, split, 'image')
     
     # load data and construct the dataset
     data_dict = {
@@ -17,7 +17,7 @@ def get_PSD_dataset(data_dir, split='train'):
     }
     file_count = sum(len(files) for _, _, files in os.walk(split_dir))  # Get the number of files
     print(f"Total files in PSD dataset at {split_dir}: {file_count}")
-    with tqdm(total=file_count, desc=f"Walking through SHIQ dataset") as pbar:
+    with tqdm(total=file_count, desc=f"Walking through PSD dataset") as pbar:
         for root, dirs, files in os.walk(split_dir):
             for file in files:
                 pbar.update(1)
