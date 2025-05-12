@@ -116,6 +116,51 @@
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest"
             ]
-        }
+        },
+        {
+            "name": "Train rgb2x",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_rgb2x.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "7",
+            },
+            "args": [
+                // "--pretrained_model_name_or_path=stabilityai/stable-diffusion-2-base",
+                "--pretrained_model_name_or_path=zheng95z/rgb-to-x",
+                "--train_data_dir_hypersim=/labworking/Users/jyang/data/hypersim/for_lotus",
+                "--resolution_hypersim=576",
+                "--train_data_dir_vkitti=/labworking/Users_A-L/jyang/data/lotus/vkitti",
+                "--resolution_vkitti=375",
+                "--prob_hypersim=0.",
+                // "--prob_vkitti=0.",
+                "--mix_dataset",
+                "--random_flip",
+                "--norm_type=trunc_disparity",
+                "--align_cam_normal",
+                "--dataloader_num_workers=0",
+                "--train_batch_size=4",
+                "--gradient_accumulation_steps=1",
+                "--gradient_checkpointing",
+                "--max_grad_norm=1",
+                "--seed=42",
+                "--max_train_steps=20000",
+                "--learning_rate=3e-05",
+                "--lr_scheduler=constant",
+                "--lr_warmup_steps=0",
+                "--task_name=depth+normal",
+                "--timestep=999",
+                // "--pipeline_name=LotusGPipeline",
+                // "--pipeline_name=LotusGMultistepsPipeline", // timestep will not work
+                "--validation_images=data/quick_validation/",
+                "--validation_steps=5",
+                "--checkpointing_steps=500",
+                "--base_test_data_dir=datasets/eval/",
+                "--output_dir=output/debug",
+                "--checkpoints_total_limit=1",
+                "--resume_from_checkpoint=latest"
+            ]
+        },
     ]
 }
