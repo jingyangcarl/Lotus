@@ -1,5 +1,6 @@
 conda create -n lotus python=3.10 -y
 conda activate lotus
+# conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=11.8 -c pytorch -c nvidia # agamemnon-ub
 pip install -r requirements.txt
 
 pip install scipy easydict
@@ -23,3 +24,6 @@ python ./download.py --contains scene_cam_ --contains geometry_hdf5 --contains n
 
 # Process the data with the command
 bash utils/process_hypersim.sh
+
+
+conda remove -n lotus --all

@@ -61,6 +61,7 @@ from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
 from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
 from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
 from utils.shiq_dataset import get_SHIQ10825_dataset
+from utils.psd_dataset import get_PSD_dataset
 
 from eval import evaluation_depth, evaluation_normal
 
@@ -506,6 +507,10 @@ def save_combined_task_images_gt_pred(model_pred, target, batch, tasks, availabl
     all_gt_images = []
     all_latent_preds = []
     all_latent_gts = []
+    
+    # append the input image 
+    all_pred_images.append(torch.zeros_like(batch["pixel_values"]).to('cpu').detach())
+    all_gt_images.append(batch["pixel_values"].to('cpu').detach())
 
     for i, task in enumerate(tasks):
         if available_values.get(task, False):
@@ -515,13 +520,20 @@ def save_combined_task_images_gt_pred(model_pred, target, batch, tasks, availabl
             latent_pred = model_pred[start_idx:end_idx]
             latent_gt = target[start_idx:end_idx]
 
-            img_pred = decode(latent_pred, return_mean=False)
+            with torch.no_grad():
+                img_pred = decode(latent_pred, return_mean=False)
+
             img_gt = batch[f"{task}_values"]
 
-            all_pred_images.append(img_pred)
-            all_gt_images.append(img_gt)
-            all_latent_preds.append(latent_pred)
-            all_latent_gts.append(latent_gt)
+            # Detach and move everything to CPU right away
+            all_pred_images.append(img_pred.to('cpu').detach())
+            all_gt_images.append(img_gt.to('cpu').detach())
+            all_latent_preds.append(latent_pred.to('cpu').detach())
+            all_latent_gts.append(latent_gt.to('cpu').detach())
+
+            # Clear GPU memory for next task
+            del latent_pred, latent_gt, img_pred, img_gt
+            torch.cuda.empty_cache()
 
     if all_pred_images:
         combined_pred = torch.cat(all_pred_images, dim=2)
@@ -531,6 +543,9 @@ def save_combined_task_images_gt_pred(model_pred, target, batch, tasks, availabl
 
         save_image(torch.cat((combined_pred, combined_gt), dim=3).float(), validate_path, f'{global_step}_combined')
         save_image(torch.cat((combined_latent_pred, combined_latent_gt), dim=3).float(), validate_path, f'{global_step}_latent_combined')
+    
+    torch.cuda.empty_cache() # decode could cause OOM
+        
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -578,7 +593,15 @@ def parse_args():
         type=str,
         default=None,
         help=(
-            "A folder containing the training data for vkitti"
+            "A folder containing the training data for shiq10825"
+        ),
+    )
+    parser.add_argument(
+        "--train_data_dir_psd",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the training data for psd"
         ),
     )
     parser.add_argument(
@@ -659,6 +682,11 @@ def parse_args():
     )
     parser.add_argument(
         "--prob_shiq10825",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--prob_psd",
         type=float,
         default=0.0,
     )
@@ -896,6 +924,33 @@ def parse_args():
         args.non_ema_revision = args.revision
 
     return args
+
+
+def sample_batch_from_datasets(dataset_configs):
+    """
+    Sample a batch from configured datasets based on cumulative probability.
+
+    Args:
+        dataset_configs (list): Output from get_dataset_configs()
+
+    Returns:
+        Tuple[dict, str]: (batch, dataset_name)
+    """
+    prob_sample = random.random()
+
+    for cfg in dataset_configs:
+        if prob_sample < cfg["cum_prob"]:
+            try:
+                batch = next(cfg["iter"])
+            except StopIteration:
+                if cfg["loader"] is not None:
+                    cfg["iter"] = iter(cfg["loader"])
+                    batch = next(cfg["iter"])
+                else:
+                    raise ValueError(f"Iterator for '{cfg['name']}' exhausted and no loader to restart.")
+            return batch, cfg["name"]
+
+    raise ValueError("Dataset sampling failed. Check probability configuration.")
 
 def main():
     args = parse_args()
@@ -1153,6 +1208,23 @@ def main():
     )
     print("Loading shiq10825 dataset takes: ", time.time()-tik)
     
+    # -------------------- Dataset4: PSD --------------------
+    # https://github.com/jianweiguo/SpecularityNet-PSD
+    tik = time.time()
+    train_dataset_psd, preprocess_train_psd, collate_fn_psd = get_PSD_dataset(
+        args.train_data_dir_psd
+    )
+    train_dataset_psd = train_dataset_psd.with_transform(preprocess_train_psd)
+    train_dataloader_psd = torch.utils.data.DataLoader(
+        train_dataset_psd,
+        shuffle=True,
+        collate_fn=collate_fn_psd,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=True
+    )
+    print("Loading psd dataset takes: ", time.time()-tik)
+    
     # -------------------- Dataset4: Lightstage --------------------
     tik = time.time()
     train_dataset_lightstage = LightstageDataset()
@@ -1182,8 +1254,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_lightstage, lr_scheduler
+    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_psd, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_psd, train_dataloader_lightstage, lr_scheduler
     )
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1227,11 +1299,13 @@ def main():
     logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
     logger.info(f"  Num examples SHIQ10825 = {len(train_dataset_shiq10825)}")
+    logger.info(f"  Num examples PSD = {len(train_dataset_psd)}")
     logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
     logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
     logger.info(f"  Dataset alternation probability of SHIQ10825 = {args.prob_shiq10825}")
+    logger.info(f"  Dataset alternation probability of PSD = {args.prob_psd}")
     logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
     assert args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage <= 1+1e-8, "sum of probability of all datasets should less than 1."
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
@@ -1302,6 +1376,7 @@ def main():
         "hypersim": 0,
         "vkitti": 0,
         "shiq10825": 0,
+        "psd": 0,
         "lightstage": 0,
     }
     def get_prob_datasets_dynamic(name):
@@ -1316,53 +1391,104 @@ def main():
             prob_str += f"{dataset_name[:2].upper()}: {count/batch_count_datasets['total']:.2f} "
         
         return prob_str
-            
+
     for epoch in range(first_epoch, args.num_train_epochs):
-        iter_hypersim = iter(train_dataloader_hypersim)
-        iter_vkitti = iter(train_dataloader_vkitti)
-        iter_shiq10825 = iter(train_dataloader_shiq10825)
-        iter_lightstage = iter(train_dataloader_lightstage)
+        # iter_hypersim = iter(train_dataloader_hypersim)
+        # iter_vkitti = iter(train_dataloader_vkitti)
+        # iter_shiq10825 = iter(train_dataloader_shiq10825)
+        # iter_lightstage = iter(train_dataloader_lightstage)
 
         train_loss = 0.0
         log_ann_loss = 0.0
         log_rgb_loss = 0.0
 
-        for _ in range(len(train_dataloader_hypersim)):
+        # for _ in range(len(train_dataloader_hypersim)):
+        #     if args.mix_dataset:
+        #         prob_dataset = random.random()
+        #         dataset_name = ''
+        #         if prob_dataset < args.prob_hypersim:
+        #             batch = next(iter_hypersim)
+        #             dataset_name = 'hypersim'
+        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti:
+        #             # Important note:
+        #             # In our training process, the Hypersim dataset is larger than the VKITTI dataset
+        #             # Therefore, when the smaller VKITTI dataset is exhausted, we need to restart iterating from the beginning
+        #             try:
+        #                 batch = next(iter_vkitti)
+        #             except StopIteration:
+        #                 iter_vkitti = iter(train_dataloader_vkitti)
+        #                 batch = next(iter_vkitti)
+        #             dataset_name = 'vkitti'
+        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825:
+        #             try:
+        #                 batch = next(iter_shiq10825)
+        #             except StopIteration:
+        #                 iter_shiq10825 = iter(train_dataloader_shiq10825)
+        #                 batch = next(iter_shiq10825)
+        #             dataset_name = 'shiq10825'
+        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage:
+        #             try:
+        #                 batch = next(iter_lightstage)
+        #             except StopIteration:
+        #                 iter_lightstage = iter(train_dataloader_lightstage)
+        #                 batch = next(iter_lightstage)
+        #             dataset_name = 'lightstage'
+        #         else:
+        #             raise ValueError("The dataset probability is not valid.")
+        #         batch, dataset_name = sample_batch_from_datasets(dataset_configs)
+        #         progress_bar.set_description_str(f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}")
+        #     else:
+        #         batch = next(iter_hypersim)
+        
+        # Initialize dataset configs inside epoch loop
+        dataset_configs = [
+            {
+                "name": "hypersim",
+                "prob": args.prob_hypersim,
+                "iter": iter(train_dataloader_hypersim),
+                "loader": train_dataloader_hypersim,
+            },
+            {
+                "name": "vkitti",
+                "prob": args.prob_vkitti,
+                "iter": iter(train_dataloader_vkitti),
+                "loader": train_dataloader_vkitti,
+            },
+            {
+                "name": "shiq10825",
+                "prob": args.prob_shiq10825,
+                "iter": iter(train_dataloader_shiq10825),
+                "loader": train_dataloader_shiq10825,
+            },
+            {
+                "name": "psd",
+                "prob": args.prob_psd,
+                "iter": iter(train_dataloader_psd),
+                "loader": train_dataloader_psd,
+            },
+            {
+                "name": "lightstage",
+                "prob": args.prob_lightstage,
+                "iter": iter(train_dataloader_lightstage),
+                "loader": train_dataloader_lightstage,
+            },
+        ]
+
+        # Compute cumulative probabilities
+        total_prob = sum(cfg["prob"] for cfg in dataset_configs)
+        cum_prob = 0.0
+        for cfg in dataset_configs:
+            cum_prob += cfg["prob"] / total_prob
+            cfg["cum_prob"] = cum_prob
+        
+        for _ in range(len(dataset_configs[0]["loader"])):
             if args.mix_dataset:
-                prob_dataset = random.random()
-                dataset_name = ''
-                if prob_dataset < args.prob_hypersim:
-                    batch = next(iter_hypersim)
-                    dataset_name = 'hypersim'
-                elif prob_dataset < args.prob_hypersim + args.prob_vkitti:
-                    # Important note:
-                    # In our training process, the Hypersim dataset is larger than the VKITTI dataset
-                    # Therefore, when the smaller VKITTI dataset is exhausted, we need to restart iterating from the beginning
-                    try:
-                        batch = next(iter_vkitti)
-                    except StopIteration:
-                        iter_vkitti = iter(train_dataloader_vkitti)
-                        batch = next(iter_vkitti)
-                    dataset_name = 'vkitti'
-                elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825:
-                    try:
-                        batch = next(iter_shiq10825)
-                    except StopIteration:
-                        iter_shiq10825 = iter(train_dataloader_shiq10825)
-                        batch = next(iter_shiq10825)
-                    dataset_name = 'shiq10825'
-                elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage:
-                    try:
-                        batch = next(iter_lightstage)
-                    except StopIteration:
-                        iter_lightstage = iter(train_dataloader_lightstage)
-                        batch = next(iter_lightstage)
-                    dataset_name = 'lightstage'
-                else:
-                    raise ValueError("The dataset probability is not valid.")
-                progress_bar.set_description_str(f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}")
+                batch, dataset_name = sample_batch_from_datasets(dataset_configs)
+                progress_bar.set_description_str(
+                    f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}"
+                )
             else:
-                batch = next(iter_hypersim)
+                batch = next(dataset_configs[0]["iter"])  # always hypersim if not mixing
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space

@@ -23,7 +23,8 @@ class LightstageDataset(Dataset):
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_debug.json'
         
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
-        meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
+        # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
+        meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
         self.dataset_dir = f'{self.root_dir}/datasets/exr/{v}/{v}_2'
         self.img_dir = f'{self.root_dir}/Processed/{v}/{v}_2'
         self.olat_dir = f'{self.root_dir}/Redline/exr/{v}/{v}_2'
@@ -53,8 +54,11 @@ class LightstageDataset(Dataset):
         for _, row in enumerate(tqdm(metadata, desc='loading metadata')):
             
             if row['l'] <= 1 or row['l'] >= 348:
-                # 2+346+2
+                # 2+346+2, 3,695,650 samples
                 continue
+            
+            if row['l'] != 2:
+                continue # verify the diffuse specular removal, 10559 samples
             
             self.texts.append(row["obj"])
             self.objs.append(row["obj"])
@@ -553,7 +557,8 @@ def collate_fn_lightstage(examples):
         "pixel_values": static_values, # hack
         "cross_values": cross_values,
         "parallel_values": parallel_values,
-        "albedo_values": albedo_values,
+        # "albedo_values": albedo_values,
+        "diffuse_values": albedo_values,
         "normal_values": normal_values,
         "specular_values": specular_values,
         "sigma_values": sigma_values,
@@ -561,7 +566,8 @@ def collate_fn_lightstage(examples):
         "static_pathes": static_pathes,
         "cross_pathes": cross_pathes,
         "parallel_pathes": parallel_pathes,
-        "albedo_pathes": albedo_pathes,
+        # "albedo_pathes": albedo_pathes,
+        "diffuse_pathes": albedo_pathes,
         "normal_pathes": normal_pathes,
         "specular_pathes": specular_pathes,
         "sigma_pathes": sigma_pathes,

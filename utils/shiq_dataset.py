@@ -109,12 +109,12 @@ def get_SHIQ10825_dataset(data_dir, split='train'):
         
         example_dict = {
             "pixel_values": pixel_values,
-            # "diffuse_values": diffuse_values,
-            "albedo_values": diffuse_values,
+            "diffuse_values": diffuse_values,
+            # "albedo_values": diffuse_values,
             "specular_values": specular_values,
             "image_paths": image_paths,
-            # "diffuse_paths": diffuse_paths,
-            "albedo_paths": diffuse_paths,
+            "diffuse_paths": diffuse_paths,
+            # "albedo_paths": diffuse_paths,
             "specular_paths": specular_paths
         }
         
