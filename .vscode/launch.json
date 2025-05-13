@@ -121,7 +121,7 @@
             "name": "Train rgb2x",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/train_rgb2x.py",
+            "program": "${workspaceFolder}/train_lotus_g_rgb2x.py",
             "console": "integratedTerminal",
             "env": {
                 "CUDA_VISIBLE_DEVICES": "7",
@@ -149,15 +149,15 @@
                 "--learning_rate=3e-05",
                 "--lr_scheduler=constant",
                 "--lr_warmup_steps=0",
-                "--task_name=depth+normal",
+                "--task_name=normal",
                 "--timestep=999",
                 // "--pipeline_name=LotusGPipeline",
                 // "--pipeline_name=LotusGMultistepsPipeline", // timestep will not work
-                "--validation_images=data/quick_validation/",
+                "--validation_images=datasets/quick_validation/",
                 "--validation_steps=5",
                 "--checkpointing_steps=500",
                 "--base_test_data_dir=datasets/eval/",
-                "--output_dir=output/debug",
+                "--output_dir=output/debug/train-rgb2x/",
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest"
             ]
