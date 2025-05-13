@@ -25,8 +25,6 @@ from pathlib import Path
 from PIL import Image
 from glob import glob
 from easydict import EasyDict
-import itertools
-import time
 
 import accelerate
 import datasets
@@ -55,13 +53,10 @@ from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
-from pipeline import LotusGPipeline, LotusGMultistepsPipeline
+from pipeline import LotusGPipeline
 from utils.image_utils import concatenate_images, colorize_depth_map
 from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
 from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
-from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
-from utils.shiq_dataset import get_SHIQ10825_dataset
-from utils.psd_dataset import get_PSD_dataset
 
 from eval import evaluation_depth, evaluation_normal
 
@@ -83,22 +78,8 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
     pred_annos = []
     input_images = []
     
-    timesteps = args.timestep
-    num_inference_steps = 1
-    if isinstance(pipeline, LotusGMultistepsPipeline):
-        # LotusGMultistepsPipeline is derived from LotusGPipeline, therefore put it here before LotusGPipeline
-        timesteps = None
-        num_inference_steps = 50
-    elif isinstance(pipeline, LotusGPipeline):
-        if args.timestep is None:
-            raise ValueError("Please specify the timestep for the validation. Otherwise, the use LotusDMultistepPipeline.")
-        else:
-            timesteps = [args.timestep]
-    else:
-        raise ValueError("Not Supported Pipeline: %s" % pipeline)
-
     if task == "depth":
-        for i in tqdm(range(len(validation_images))):
+        for i in range(len(validation_images)):
             if torch.backends.mps.is_available():
                 autocast_ctx = nullcontext()
             else:
@@ -121,10 +102,10 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     rgb_in=validation_image, 
                     task_emb=task_emb,
                     prompt="", 
-                    num_inference_steps=num_inference_steps, 
-                    timesteps=timesteps,
-                    output_type='np',
+                    num_inference_steps=1, 
+                    timesteps=[args.timestep],
                     generator=generator, 
+                    output_type='np',
                     ).images[0]
                 
                 # Post-process the prediction
@@ -158,158 +139,18 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
                     rgb_in=validation_image, 
                     task_emb=task_emb,
                     prompt="", 
-                    num_inference_steps=num_inference_steps, 
-                    timesteps=timesteps,
+                    num_inference_steps=1, 
+                    timesteps=[args.timestep],
                     generator=generator,
                     ).images[0]
                 
                 pred_annos.append(pred_normal)
                 
-    elif task == "depth+normal":
-        tasks = ["depth", "normal"]
-        tasks_labels = [[0, 1], [1, 0]]
-        
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
-            else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
-
-            with autocast_ctx:
-                # Preprocess validation image
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
-                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
-                validation_image = validation_image / 127.5 - 1.0 
-                validation_image = validation_image.to(accelerator.device)
-                
-                for (task, task_label) in zip(tasks, tasks_labels):
-                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
-                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
-                
-                    # Run
-                    if task == "depth":
-                        pred = pipeline(
-                            rgb_in=validation_image, 
-                            task_emb=task_emb,
-                            prompt="", 
-                            num_inference_steps=num_inference_steps, 
-                            timesteps=timesteps,
-                            # output_type='np',
-                            generator=generator, 
-                            ).images[0]
-                        
-                        # pred = pred.mean(axis=-1)
-                        # is_reverse_color = "disparity" in args.norm_type
-                        # pred = colorize_depth_map(pred, reverse_color=is_reverse_color)
-                    elif task == "normal":
-                        pred = pipeline(
-                            rgb_in=validation_image, 
-                            task_emb=task_emb,
-                            prompt="", 
-                            num_inference_steps=num_inference_steps, 
-                            timesteps=timesteps,
-                            generator=generator, 
-                            ).images[0]
-                    
-                    pred_annos.append(pred)
-            
-        # based on tasks, split the pred_annos lists based on the number of tasks
-        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
-        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
-        
-    elif task == 'diffuse+specular':
-        tasks = ['diffuse', 'specular']
-        tasks_labels = [[0, 1], [1, 0]]
-        
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
-            else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
-
-            with autocast_ctx:
-                # Preprocess validation image
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
-                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
-                validation_image = validation_image / 127.5 - 1.0 
-                validation_image = validation_image.to(accelerator.device)
-                
-                for (task, task_label) in zip(tasks, tasks_labels):
-                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
-                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
-                
-                    # Run
-                    pred = pipeline(
-                        rgb_in=validation_image, 
-                        task_emb=task_emb,
-                        prompt="", 
-                        num_inference_steps=num_inference_steps, 
-                        timesteps=timesteps,
-                        generator=generator, 
-                        ).images[0]
-                    
-                    pred_annos.append(pred)
-        # based on tasks, split the pred_annos lists based on the number of tasks
-        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
-        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
-        
-    elif task == "brdf":
-        tasks = ['albedo', 'normal', 'specular', 'sigma', 'depth']
-        num_tasks = len(tasks) + 1  # including RGB
-        
-        # Generate evenly spaced points in [0, 2pi]^2
-        grid_size = math.ceil(math.sqrt(num_tasks))
-        linspace = torch.linspace(0, 2 * math.pi, grid_size)
-        all_coords = list(itertools.product(linspace, linspace))
-        assert len(all_coords) >= num_tasks, "Grid is too small to assign unique labels"
-        
-        # Take the first N task labels
-        tasks_labels = [list(map(float, all_coords[i])) for i in range(num_tasks)]
-        
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
-            else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
-
-            with autocast_ctx:
-                # Preprocess validation image
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
-                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
-                validation_image = validation_image / 127.5 - 1.0 
-                validation_image = validation_image.to(accelerator.device)
-                
-                for (task, task_label) in zip(tasks, tasks_labels):
-                    task_emb = torch.tensor(task_label).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
-                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
-                
-                    # Run
-                    pred = pipeline(
-                        rgb_in=validation_image, 
-                        task_emb=task_emb,
-                        prompt="", 
-                        num_inference_steps=num_inference_steps, 
-                        timesteps=timesteps,
-                        generator=generator, 
-                        ).images[0]
-                    
-                    pred_annos.append(pred)
-                    
-        # based on tasks, split the pred_annos lists based on the number of tasks
-        # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
-        pred_annos = [pred_annos[i::len(tasks)] for i in range(len(tasks))]
-                
     else:
         raise ValueError(f"Not Supported Task: {args.task_name}!")
 
     # Save output
-    save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
+    save_output = concatenate_images(input_images, pred_annos)
     save_dir = os.path.join(args.output_dir,'images')
     os.makedirs(save_dir, exist_ok=True)
     save_output.save(os.path.join(save_dir, f'{step:05d}.jpg'))
@@ -433,8 +274,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     # Load pipeline
     scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     scheduler.register_to_config(prediction_type=args.prediction_type)
-    # pipeline = LotusGPipeline.from_pretrained(
-    pipeline = eval(args.pipeline_name).from_pretrained(
+    pipeline = LotusGPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         scheduler=scheduler,
         vae=accelerator.unwrap_model(vae),
@@ -462,90 +302,10 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     run_example_validation(pipeline, task, args, step, accelerator, generator)
 
     # Run evaluation
-    # run_evaluation(pipeline, task, args, step, accelerator)
+    run_evaluation(pipeline, task, args, step, accelerator)
 
     del pipeline
     torch.cuda.empty_cache()
-    
-def save_combined_task_images_gt_pred(model_pred, target, batch, tasks, available_values,
-                               vae, args, global_step, bsz_per_task):
-    """
-    Decode and save a single combined image comparing predictions and ground truths across multiple tasks.
-
-    Args:
-        model_pred (Tensor): Latent predictions for all tasks.
-        target (Tensor): Ground truth latents for all tasks.
-        batch (dict): Input batch containing ground truth task values.
-        tasks (list): List of task names.
-        available_values (dict): Availability mask per task.
-        vae (nn.Module): VAE model with config.scaling_factor, post_quant_conv, and decoder.
-        args (Namespace): Contains output_dir for saving images.
-        global_step (int): Training step for naming outputs.
-        bsz_per_task (int): Batch size per task.
-    """
-    def decode(latent: torch.Tensor, return_mean=False) -> torch.Tensor:
-        # Ensure latent is in the same dtype as the model
-        latent = latent.to(dtype=vae.post_quant_conv.weight.dtype)
-        latent = latent / vae.config.scaling_factor
-        z = vae.post_quant_conv(latent)
-        stacked = vae.decoder(z)
-        return stacked.mean(dim=1, keepdim=True) if return_mean else stacked
-
-    def save_image(image, path_save, name):
-        image = image.to('cpu').detach().numpy()
-        image = image[0, :3, ...]
-        image = np.transpose(image, (1, 2, 0))
-        image = (image * 255).astype(np.uint8)
-        image = Image.fromarray(image)
-        image.save(os.path.join(path_save, f'{name}.png'))
-
-    # Create output directory
-    validate_path = os.path.join(args.output_dir, 'training')
-    os.makedirs(validate_path, exist_ok=True)
-
-    all_pred_images = []
-    all_gt_images = []
-    all_latent_preds = []
-    all_latent_gts = []
-    
-    # append the input image 
-    all_pred_images.append(torch.zeros_like(batch["pixel_values"]).to('cpu').detach())
-    all_gt_images.append(batch["pixel_values"].to('cpu').detach())
-
-    for i, task in enumerate(tasks):
-        if available_values.get(task, False):
-            start_idx = bsz_per_task * i
-            end_idx = bsz_per_task * (i + 1)
-
-            latent_pred = model_pred[start_idx:end_idx]
-            latent_gt = target[start_idx:end_idx]
-
-            with torch.no_grad():
-                img_pred = decode(latent_pred, return_mean=False)
-
-            img_gt = batch[f"{task}_values"]
-
-            # Detach and move everything to CPU right away
-            all_pred_images.append(img_pred.to('cpu').detach())
-            all_gt_images.append(img_gt.to('cpu').detach())
-            all_latent_preds.append(latent_pred.to('cpu').detach())
-            all_latent_gts.append(latent_gt.to('cpu').detach())
-
-            # Clear GPU memory for next task
-            del latent_pred, latent_gt, img_pred, img_gt
-            torch.cuda.empty_cache()
-
-    if all_pred_images:
-        combined_pred = torch.cat(all_pred_images, dim=2)
-        combined_gt = torch.cat(all_gt_images, dim=2)
-        combined_latent_pred = torch.cat(all_latent_preds, dim=2)
-        combined_latent_gt = torch.cat(all_latent_gts, dim=2)
-
-        save_image(torch.cat((combined_pred, combined_gt), dim=3).float(), validate_path, f'{global_step}_combined')
-        save_image(torch.cat((combined_latent_pred, combined_latent_gt), dim=3).float(), validate_path, f'{global_step}_latent_combined')
-    
-    torch.cuda.empty_cache() # decode could cause OOM
-        
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -586,22 +346,6 @@ def parse_args():
         default=None,
         help=(
             "A folder containing the training data for vkitti"
-        ),
-    )
-    parser.add_argument(
-        "--train_data_dir_shiq10825",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training data for shiq10825"
-        ),
-    )
-    parser.add_argument(
-        "--train_data_dir_psd",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training data for psd"
         ),
     )
     parser.add_argument(
@@ -662,38 +406,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--resolution_lightstage",
-        type=int,
-        default=512,
-        help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
-            " resolution"
-        ),
-    )
-    parser.add_argument(
         "--prob_hypersim",
         type=float,
         default=0.9,
-    )
-    parser.add_argument(
-        "--prob_vkitti",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--prob_shiq10825",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--prob_psd",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
-        "--prob_lightstage",
-        type=float,
-        default=0.1,
     )
     parser.add_argument(
         "--mix_dataset",
@@ -894,21 +609,6 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
-    
-    # add multitask loss weight
-    parser.add_argument(
-        "--loss_weight_string",
-        type=str,
-        default="1.0,1.0",
-        help="The loss weight for each task. "
-    )
-    parser.add_argument(
-        "--pipeline_name",
-        type=str,
-        choices=["LotusGPipeline", "LotusGMultistepsPipeline"],
-        default="LotusGPipeline",
-        help="The pipeline name to use. "
-    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -924,33 +624,6 @@ def parse_args():
         args.non_ema_revision = args.revision
 
     return args
-
-
-def sample_batch_from_datasets(dataset_configs):
-    """
-    Sample a batch from configured datasets based on cumulative probability.
-
-    Args:
-        dataset_configs (list): Output from get_dataset_configs()
-
-    Returns:
-        Tuple[dict, str]: (batch, dataset_name)
-    """
-    prob_sample = random.random()
-
-    for cfg in dataset_configs:
-        if prob_sample < cfg["cum_prob"]:
-            try:
-                batch = next(cfg["iter"])
-            except StopIteration:
-                if cfg["loader"] is not None:
-                    cfg["iter"] = iter(cfg["loader"])
-                    batch = next(cfg["iter"])
-                else:
-                    raise ValueError(f"Iterator for '{cfg['name']}' exhausted and no loader to restart.")
-            return batch, cfg["name"]
-
-    raise ValueError("Dataset sampling failed. Check probability configuration.")
 
 def main():
     args = parse_args()
@@ -1156,7 +829,6 @@ def main():
 
     # Get the datasets and dataloaders.
     # -------------------- Dataset1: Hypersim --------------------
-    tik = time.time()
     train_hypersim_dataset, preprocess_train_hypersim, collate_fn_hypersim = get_hypersim_dataset_depth_normal(
         args.train_data_dir_hypersim, args.resolution_hypersim, args.random_flip, 
         norm_type=args.norm_type, truncnorm_min=args.truncnorm_min, align_cam_normal=args.align_cam_normal
@@ -1175,10 +847,7 @@ def main():
         num_workers=args.dataloader_num_workers,
         pin_memory=True
     )
-    print("Loading hypersim dataset takes: ", time.time()-tik)
-    
     # -------------------- Dataset2: VKITTI --------------------
-    tik = time.time()
     transform_vkitti = VKITTITransform(random_flip=args.random_flip)
     train_dataset_vkitti = VKITTIDataset(args.train_data_dir_vkitti, transform_vkitti, args.norm_type, truncnorm_min=args.truncnorm_min)
     train_dataloader_vkitti = torch.utils.data.DataLoader(
@@ -1188,55 +857,7 @@ def main():
         batch_size=args.train_batch_size, 
         num_workers=args.dataloader_num_workers,
         pin_memory=True
-    )
-    print("Loading vkitti dataset takes: ", time.time()-tik)
-    
-    # -------------------- Dataset3: SHIQ10825 --------------------
-    # https://github.com/fu123456/SHIQ/tree/main
-    tik = time.time()
-    train_dataset_shiq10825, preprocess_train_shiq10825, collate_fn_shiq10825 = get_SHIQ10825_dataset(
-        args.train_data_dir_shiq10825
-    )
-    train_dataset_shiq10825 = train_dataset_shiq10825.with_transform(preprocess_train_shiq10825)
-    train_dataloader_shiq10825 = torch.utils.data.DataLoader(
-        train_dataset_shiq10825,
-        shuffle=True,
-        collate_fn=collate_fn_shiq10825,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-        pin_memory=True
-    )
-    print("Loading shiq10825 dataset takes: ", time.time()-tik)
-    
-    # -------------------- Dataset4: PSD --------------------
-    # https://github.com/jianweiguo/SpecularityNet-PSD
-    tik = time.time()
-    train_dataset_psd, preprocess_train_psd, collate_fn_psd = get_PSD_dataset(
-        args.train_data_dir_psd
-    )
-    train_dataset_psd = train_dataset_psd.with_transform(preprocess_train_psd)
-    train_dataloader_psd = torch.utils.data.DataLoader(
-        train_dataset_psd,
-        shuffle=True,
-        collate_fn=collate_fn_psd,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-        pin_memory=True
-    )
-    print("Loading psd dataset takes: ", time.time()-tik)
-    
-    # -------------------- Dataset4: Lightstage --------------------
-    tik = time.time()
-    train_dataset_lightstage = LightstageDataset()
-    train_dataloader_lightstage = torch.utils.data.DataLoader(
-        train_dataset_lightstage,
-        shuffle=True,
-        collate_fn=collate_fn_lightstage,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-        pin_memory=True
-    )
-    print("Loading lightstage dataset takes: ", time.time()-tik)
+        )
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -1254,8 +875,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_psd, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_shiq10825, train_dataloader_psd, train_dataloader_lightstage, lr_scheduler
+    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler
     )
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1298,16 +919,8 @@ def main():
     logger.info("***** Running training *****")
     logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
-    logger.info(f"  Num examples SHIQ10825 = {len(train_dataset_shiq10825)}")
-    logger.info(f"  Num examples PSD = {len(train_dataset_psd)}")
-    logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
-    logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
-    logger.info(f"  Dataset alternation probability of SHIQ10825 = {args.prob_shiq10825}")
-    logger.info(f"  Dataset alternation probability of PSD = {args.prob_psd}")
-    logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
-    assert args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage <= 1+1e-8, "sum of probability of all datasets should less than 1."
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1315,7 +928,6 @@ def main():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Unet timestep = {args.timestep}")
     logger.info(f"  Task name: {args.task_name}")
-    logger.info(f"  Task Loss Weights: {args.loss_weight_string}")
     logger.info(f"  Is Full Evaluation?: {args.FULL_EVALUATION}")
     logger.info(f"Output Workspace: {args.output_dir}")
 
@@ -1369,178 +981,36 @@ def main():
             weight_dtype,
             global_step,
         )
-        pass
-    
-    batch_count_datasets = {
-        "total": 0,
-        "hypersim": 0,
-        "vkitti": 0,
-        "shiq10825": 0,
-        "psd": 0,
-        "lightstage": 0,
-    }
-    def get_prob_datasets_dynamic(name):
-        batch_count_datasets["total"] += 1
-        batch_count_datasets[name] += 1
-        
-        # get formated count/total string
-        prob_str = ""
-        for dataset_name, count in batch_count_datasets.items():
-            if dataset_name == "total":
-                continue
-            prob_str += f"{dataset_name[:2].upper()}: {count/batch_count_datasets['total']:.2f} "
-        
-        return prob_str
-
+            
     for epoch in range(first_epoch, args.num_train_epochs):
-        # iter_hypersim = iter(train_dataloader_hypersim)
-        # iter_vkitti = iter(train_dataloader_vkitti)
-        # iter_shiq10825 = iter(train_dataloader_shiq10825)
-        # iter_lightstage = iter(train_dataloader_lightstage)
+        iter_hypersim = iter(train_dataloader_hypersim)
+        iter_vkitti = iter(train_dataloader_vkitti)
 
         train_loss = 0.0
         log_ann_loss = 0.0
         log_rgb_loss = 0.0
 
-        # for _ in range(len(train_dataloader_hypersim)):
-        #     if args.mix_dataset:
-        #         prob_dataset = random.random()
-        #         dataset_name = ''
-        #         if prob_dataset < args.prob_hypersim:
-        #             batch = next(iter_hypersim)
-        #             dataset_name = 'hypersim'
-        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti:
-        #             # Important note:
-        #             # In our training process, the Hypersim dataset is larger than the VKITTI dataset
-        #             # Therefore, when the smaller VKITTI dataset is exhausted, we need to restart iterating from the beginning
-        #             try:
-        #                 batch = next(iter_vkitti)
-        #             except StopIteration:
-        #                 iter_vkitti = iter(train_dataloader_vkitti)
-        #                 batch = next(iter_vkitti)
-        #             dataset_name = 'vkitti'
-        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825:
-        #             try:
-        #                 batch = next(iter_shiq10825)
-        #             except StopIteration:
-        #                 iter_shiq10825 = iter(train_dataloader_shiq10825)
-        #                 batch = next(iter_shiq10825)
-        #             dataset_name = 'shiq10825'
-        #         elif prob_dataset < args.prob_hypersim + args.prob_vkitti + args.prob_shiq10825 + args.prob_lightstage:
-        #             try:
-        #                 batch = next(iter_lightstage)
-        #             except StopIteration:
-        #                 iter_lightstage = iter(train_dataloader_lightstage)
-        #                 batch = next(iter_lightstage)
-        #             dataset_name = 'lightstage'
-        #         else:
-        #             raise ValueError("The dataset probability is not valid.")
-        #         batch, dataset_name = sample_batch_from_datasets(dataset_configs)
-        #         progress_bar.set_description_str(f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}")
-        #     else:
-        #         batch = next(iter_hypersim)
-        
-        # Initialize dataset configs inside epoch loop
-        dataset_configs = [
-            {
-                "name": "hypersim",
-                "prob": args.prob_hypersim,
-                "iter": iter(train_dataloader_hypersim),
-                "loader": train_dataloader_hypersim,
-            },
-            {
-                "name": "vkitti",
-                "prob": args.prob_vkitti,
-                "iter": iter(train_dataloader_vkitti),
-                "loader": train_dataloader_vkitti,
-            },
-            {
-                "name": "shiq10825",
-                "prob": args.prob_shiq10825,
-                "iter": iter(train_dataloader_shiq10825),
-                "loader": train_dataloader_shiq10825,
-            },
-            {
-                "name": "psd",
-                "prob": args.prob_psd,
-                "iter": iter(train_dataloader_psd),
-                "loader": train_dataloader_psd,
-            },
-            {
-                "name": "lightstage",
-                "prob": args.prob_lightstage,
-                "iter": iter(train_dataloader_lightstage),
-                "loader": train_dataloader_lightstage,
-            },
-        ]
-
-        # Compute cumulative probabilities
-        total_prob = sum(cfg["prob"] for cfg in dataset_configs)
-        cum_prob = 0.0
-        for cfg in dataset_configs:
-            cum_prob += cfg["prob"] / total_prob
-            cfg["cum_prob"] = cum_prob
-        
-        for _ in range(len(dataset_configs[0]["loader"])):
+        for _ in range(len(train_dataloader_hypersim)):
             if args.mix_dataset:
-                batch, dataset_name = sample_batch_from_datasets(dataset_configs)
-                progress_bar.set_description_str(
-                    f"Epoch {epoch+1}/{args.num_train_epochs} | {get_prob_datasets_dynamic(dataset_name)}"
-                )
+                if random.random() < args.prob_hypersim:
+                    batch = next(iter_hypersim)
+                else:
+                    # Important note:
+                    # In our training process, the Hypersim dataset is larger than the VKITTI dataset
+                    # Therefore, when the smaller VKITTI dataset is exhausted, we need to restart iterating from the beginning
+                    try:
+                        batch = next(iter_vkitti)
+                    except StopIteration:
+                        iter_vkitti = iter(train_dataloader_vkitti)
+                        batch = next(iter_vkitti)
             else:
-                batch = next(dataset_configs[0]["iter"])  # always hypersim if not mixing
+                batch = next(iter_hypersim)
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
-                    # original
-                    rgb_latents = vae.encode(
-                        torch.cat((batch["pixel_values"],batch["pixel_values"]), dim=0).to(weight_dtype)
-                        ).latent_dist.sample()
-                elif args.task_name[0] == "depth+normal":
-                    tasks = args.task_name[0].split("+") # tasks = ['depth', 'normal']
-                    tasks_labels = [[0, 1], [1, 0], [0, 0]] # anno [depth, normal], rgb
-                    tasks_weights = args.loss_weight_string.split(",")
-                    tasks_weights = [float(i) for i in tasks_weights] # depth, normal
-                    assert len(tasks_weights) == len(tasks)
-                    rgb_latents = vae.encode(
-                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
-                        ).latent_dist.sample()
-                elif args.task_name[0] == 'diffuse+specular':
-                    tasks = args.task_name[0].split("+")
-                    tasks_labels = [[0, 1], [1, 0], [0, 0]] # anno [diffuse, specular], rgb
-                    tasks_weights = args.loss_weight_string.split(",")
-                    tasks_weights = [float(i) for i in tasks_weights] # diffuse, specular
-                    assert len(tasks_weights) == len(tasks)
-                    rgb_latents = vae.encode(
-                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
-                        ).latent_dist.sample()
-                elif args.task_name[0] == "brdf":
-                    tasks = ['albedo', 'normal', 'specular', 'sigma', 'depth']
-                    num_tasks = len(tasks) + 1  # including RGB
-                    
-                    # Generate evenly spaced points in [0, 2pi]^2
-                    grid_size = math.ceil(math.sqrt(num_tasks))
-                    linspace = torch.linspace(0, 2 * math.pi, grid_size)
-                    all_coords = list(itertools.product(linspace, linspace))
-                    assert len(all_coords) >= num_tasks, "Grid is too small to assign unique labels"
-                    
-                    # Take the first N task labels
-                    tasks_labels = [list(map(float, all_coords[i])) for i in range(num_tasks)]
-                    # last one is RGB
-                    rgb_label = tasks_labels[-1]
-                    task_labels_map = dict(zip(tasks, tasks_labels[:-1]))
-                    
-                    # fill tasks with all 1s
-                    # tasks_weights = [1.0] * len(tasks)
-                    tasks_weights = args.loss_weight_string.split(",")
-                    tasks_weights = [float(i) for i in tasks_weights] # 'albedo', 'normal', 'specular', 'sigma', 'depth'
-                    
-                    rgb_latents = vae.encode(
-                        torch.cat([batch["pixel_values"]] + [batch["pixel_values"] for _ in tasks], dim=0).to(weight_dtype)
-                        ).latent_dist.sample()
-                else:
-                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                rgb_latents = vae.encode(
+                    torch.cat((batch["pixel_values"],batch["pixel_values"]), dim=0).to(weight_dtype)
+                    ).latent_dist.sample()
                 rgb_latents = rgb_latents * vae.config.scaling_factor
                 # Convert target_annotations to latent space
                 assert len(args.task_name) == 1
@@ -1548,63 +1018,15 @@ def main():
                     TAR_ANNO = "depth_values"
                 elif args.task_name[0] == "normal":
                     TAR_ANNO = "normal_values"
-                elif args.task_name[0] == "depth+normal":
-                    pass
-                elif args.task_name[0] == "diffuse+specular":
-                    pass
-                elif args.task_name[0] == "brdf":
-                    pass
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
-                
-                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
-                    # original
-                    target_latents = vae.encode(
-                        torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
+                target_latents = vae.encode(
+                    torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
                     ).latent_dist.sample()
-                    tasks_num = 1
-                elif args.task_name[0] == "depth+normal":
-                    target_latents = vae.encode(
-                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
-                    tasks_num = len(tasks)
-                elif args.task_name[0] == "diffuse+specular":
-                    # assign the missing part
-                    available_values = {}
-                    for task in tasks:
-                        if f'{task}_values' not in batch:
-                            batch[f'{task}_values'] = torch.zeros_like(batch["pixel_values"])
-                            tasks_weights[tasks.index(task)] = 0.0
-                            available_values[task] = False
-                        else:
-                            available_values[task] = True
-                    
-                    target_latents = vae.encode(
-                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
-                    tasks_num = len(tasks)
-                elif args.task_name[0] == "brdf":
-                    
-                    # assign the missing part
-                    available_values = {}
-                    for task in tasks:
-                        if f'{task}_values' not in batch:
-                            batch[f'{task}_values'] = torch.zeros_like(batch["pixel_values"])
-                            tasks_weights[tasks.index(task)] = 0.0
-                            available_values[task] = False
-                        else:
-                            available_values[task] = True
-                    
-                    target_latents = vae.encode(
-                        torch.cat([batch[f"{task}_values"] for task in tasks] + [batch["pixel_values"]], dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
-                    tasks_num = len(tasks)
-                else:
-                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 target_latents = target_latents * vae.config.scaling_factor
                 
                 bsz = target_latents.shape[0]
-                bsz_per_task = int(bsz/(tasks_num+1))
+                bsz_per_task = int(bsz/2)
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
@@ -1633,19 +1055,7 @@ def main():
                     new_noise = noise + args.input_perturbation * torch.randn_like(noise)
                 
                 # Set timestep
-                if args.pipeline_name == "LotusGPipeline":
-                    # single timestep
-                    timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
-                elif args.pipeline_name == "LotusGMultistepsPipeline":
-                    # multiple timesteps
-                    if args.seed is None:
-                        generator = None
-                    else:
-                        generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-                    
-                    # Sample a random timestep for each image
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long()
-                    pass
+                timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
                 timesteps = timesteps.long()
                 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -1677,59 +1087,19 @@ def main():
                 target = target_latents
 
                 # Get the task embedding
-                def task_embedding(task_label):
-                    task_emb = torch.tensor(task_label).float().unsqueeze(0).to(accelerator.device)
-                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(bsz_per_task, 1)
-                    return task_emb
-                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
-                    task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
-                    task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
-                    task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
-                    task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
-                    task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
-                elif args.task_name[0] == "depth+normal":
-                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
-                elif args.task_name[0] == "diffuse+specular":
-                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
-                elif args.task_name[0] == "brdf":
-                    task_emb = torch.cat([task_embedding(tasks_labels[i]) for i in range(len(tasks_labels))], dim=0)
-                else:
-                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
+                task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
+                task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
+                task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
+                task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
 
                 # Predict
                 model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False,
                                 class_labels=task_emb)[0]
 
                 # Compute loss
-                if args.task_name[0] == "depth" or args.task_name[0] == "normal":
-                    anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
-                    rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
-                elif args.task_name[0] == "depth+normal":
-                    anno_loss = 0.
-                    for i, task_weight in enumerate(tasks_weights):
-                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
-                        anno_loss += task_loss * task_weight
-                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
-                elif args.task_name[0] == "diffuse+specular":
-                    anno_loss = 0.
-                    tasks_loss = {}
-                    for i, (task_weight, task) in enumerate(zip(tasks_weights, tasks)):
-                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
-                        tasks_loss[task] = task_loss
-                        anno_loss += task_loss * task_weight
-                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
-                elif args.task_name[0] == "brdf":
-                    anno_loss = 0.
-                    tasks_loss = {}
-                    for i, (task_weight, task) in enumerate(zip(tasks_weights, tasks)):
-                        task_loss = F.mse_loss(model_pred[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), target[bsz_per_task*(i+0):bsz_per_task*(i+1)][valid_mask_down_rgb[bsz_per_task*(i+0):bsz_per_task*(i+1)]].float(), reduction="mean")
-                        tasks_loss[task] = task_loss
-                        anno_loss += task_loss * task_weight
-                    rgb_loss = F.mse_loss(model_pred[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), target[-bsz_per_task:][valid_mask_down_rgb[-bsz_per_task:]].float(), reduction="mean")
-                    
-                    # depth2normal loss?
-                else:
-                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
+                rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
                 loss = anno_loss + rgb_loss
 
                 # Gather loss
@@ -1794,20 +1164,7 @@ def main():
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
                 
-                    if args.validation_images is not None and global_step % validation_steps == 0:
-                        
-                        save_combined_task_images_gt_pred(
-                            model_pred=model_pred,
-                            target=target,
-                            batch=batch,
-                            tasks=tasks,
-                            available_values=available_values,
-                            vae=vae,
-                            args=args,
-                            global_step=global_step,
-                            bsz_per_task=bsz_per_task
-                        )
-                    
+                    if global_step % validation_steps == 0:
                         log_validation(
                             vae,
                             text_encoder,
@@ -1818,7 +1175,6 @@ def main():
                             weight_dtype,
                             global_step,
                         )
-                        
 
             if global_step >= args.max_train_steps:
                 break
@@ -1828,8 +1184,7 @@ def main():
     if accelerator.is_main_process:
         unet = unwrap_model(unet)
 
-        # pipeline = LotusGPipeline.from_pretrained(
-        pipeline = eval(args.pipeline_name).from_pretrained(
+        pipeline = LotusGPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             text_encoder=text_encoder,
             vae=vae,
