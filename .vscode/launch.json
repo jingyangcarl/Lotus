@@ -154,13 +154,16 @@
                 // "--pipeline_name=LotusGPipeline",
                 // "--pipeline_name=LotusGMultistepsPipeline", // timestep will not work
                 "--validation_images=datasets/quick_validation/",
-                "--validation_steps=5",
-                "--checkpointing_steps=500",
+                "--validation_steps=3",
+                "--checkpointing_steps=3",
                 "--base_test_data_dir=datasets/eval/",
                 "--output_dir=output/debug/train-rgb2x/",
                 "--checkpoints_total_limit=1",
-                "--resume_from_checkpoint=latest"
-            ]
+                "--resume_from_checkpoint=latest",
+                "--use_lora",
+
+            ],
+            "justMyCode": true
         },
     ]
 }
