@@ -15,6 +15,7 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
+export CUDA_VISIBLE_DEVICES=7
 
 # model configs
 export TIMESTEP=999
@@ -28,7 +29,7 @@ export VAL_STEP=500
 # output dir
 export OUTPUT_DIR="output/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_lora/"
 
-accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
+accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
