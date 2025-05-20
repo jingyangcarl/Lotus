@@ -49,7 +49,8 @@ accelerate launch --mixed_precision="fp16" \
   --seed=42 \
   --max_train_steps=20000 \
   --learning_rate=3e-05 \
-  --lr_scheduler="constant" --lr_warmup_steps=0 \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
   --task_name=$TASK_NAME \
   --timestep=$TIMESTEP \
   --validation_images=$VALIDATION_IMAGES \
