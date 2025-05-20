@@ -11,7 +11,7 @@ export RES_VKITTI=375
 export P_HYPERSIM=1
 
 # training configs
-export BATCH_SIZE=8
+export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
@@ -28,9 +28,9 @@ export VAL_STEP=500
 # output dir
 export OUTPUT_DIR="output/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}/"
 
-accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision="fp16" \
+accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13226" \
-  train_lotus_g.py \
+  train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \
   --resolution_hypersim=$RES_HYPERSIM \

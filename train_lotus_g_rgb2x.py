@@ -403,59 +403,70 @@ def run_evaluation(pipeline, task, args, step, accelerator):
 def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step):
     logger.info("Running validation for task: %s... " % args.task_name[0])
     task = args.task_name[0]
-
-    # Load pipeline
-    scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    scheduler.register_to_config(prediction_type=args.prediction_type)
-    pipeline = LotusGPipeline.from_pretrained(
-        args.pretrained_model_name_or_path,
-        scheduler=scheduler,
-        vae=accelerator.unwrap_model(vae),
-        text_encoder=accelerator.unwrap_model(text_encoder),
-        tokenizer=tokenizer,
-        unet=accelerator.unwrap_model(unet),
-        safety_checker=None,
-        revision=args.revision,
-        variant=args.variant,
-        torch_dtype=weight_dtype,
-    )
-    pipeline = pipeline.to(accelerator.device)
-    pipeline.set_progress_bar_config(disable=True)
-    
-    
-    pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
-        "zheng95z/rgb-to-x",
-        torch_dtype=weight_dtype,
-        cache_dir=os.path.join("/home/jyang/projects/rgbx/rgb2x/model_cache"),
-    )
-    pipeline_rgb2x.scheduler = DDIMScheduler.from_config(
-        pipeline_rgb2x.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
-    )
-    pipeline_rgb2x.to(accelerator.device)
-    pipeline_rgb2x.set_progress_bar_config(disable=True)
-    
-    if args.enable_xformers_memory_efficient_attention:
-        pipeline.enable_xformers_memory_efficient_attention()
-        pipeline_rgb2x.enable_xformers_memory_efficient_attention()
   
     if args.seed is None:
         generator = None
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
     
-    
-    # Run example-validation
-    # run_example_validation(pipeline, task, args, step, accelerator, generator)
-    
-    # photo_path = '/home/jyang/projects/ObjectReal/external/lotus/datasets/quick_validation/00.png'
-    # rgb2x(pipeline_rgb2x, photo_path)
-    rgb2x_photos(pipeline_rgb2x, task, args, step, accelerator, generator)
-    
-    # Run evaluation
-    # run_evaluation(pipeline, task, args, step, accelerator)
+    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
 
-    del pipeline
-    del pipeline_rgb2x
+        # Load pipeline
+        scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler.register_to_config(prediction_type=args.prediction_type)
+        pipeline = LotusGPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            scheduler=scheduler,
+            vae=accelerator.unwrap_model(vae),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+            tokenizer=tokenizer,
+            unet=accelerator.unwrap_model(unet),
+            safety_checker=None,
+            revision=args.revision,
+            variant=args.variant,
+            torch_dtype=weight_dtype,
+        )
+        pipeline = pipeline.to(accelerator.device)
+        pipeline.set_progress_bar_config(disable=True)
+        
+        if args.enable_xformers_memory_efficient_attention:
+            pipeline.enable_xformers_memory_efficient_attention()
+    
+        # Run example-validation
+        run_example_validation(pipeline, task, args, step, accelerator, generator)
+    
+        # Run evaluation
+        # run_evaluation(pipeline, task, args, step, accelerator)
+        
+        del pipeline
+    
+    elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+        pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            vae=accelerator.unwrap_model(vae),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+            tokenizer=tokenizer,
+            unet=accelerator.unwrap_model(unet),
+            safety_checker=None,
+            revision=args.revision,
+            variant=args.variant,
+            torch_dtype=weight_dtype,
+        )
+        pipeline_rgb2x.scheduler = DDIMScheduler.from_config(
+            pipeline_rgb2x.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+        )
+        pipeline_rgb2x.to(accelerator.device)
+        pipeline_rgb2x.set_progress_bar_config(disable=True)
+        
+        if args.enable_xformers_memory_efficient_attention:
+            pipeline_rgb2x.enable_xformers_memory_efficient_attention()
+            
+        # photo_path = '/home/jyang/projects/ObjectReal/external/lotus/datasets/quick_validation/00.png'
+        # rgb2x(pipeline_rgb2x, photo_path)
+        rgb2x_photos(pipeline_rgb2x, task, args, step, accelerator, generator)
+
+        del pipeline_rgb2x
+        
     torch.cuda.empty_cache()
 
 def parse_args():
@@ -875,13 +886,14 @@ def main():
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
         )
     
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision,
-        class_embed_type="projection", projection_class_embeddings_input_dim=4,
-        low_cpu_mem_usage=False, device_map=None,
-    )
-    
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+        
+        unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision,
+            class_embed_type="projection", projection_class_embeddings_input_dim=4,
+            low_cpu_mem_usage=False, device_map=None,
+        )
+        
         # Replace the first layer to accept 8 in_channels. 
         _weight = unet.conv_in.weight.clone()
         _bias = unet.conv_in.bias.clone()
@@ -900,8 +912,11 @@ def main():
         _new_conv_in.weight = nn.Parameter(_weight)
         _new_conv_in.bias = nn.Parameter(_bias)
         unet.conv_in = _new_conv_in
-    else:
-        pass
+    elif 'rgb-to-x':
+        unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
+            low_cpu_mem_usage=False, device_map=None,
+        )
 
     # Freeze vae and text_encoder and set unet to trainable
     vae.requires_grad_(False)
@@ -1125,16 +1140,16 @@ def main():
     )
     
     if accelerator.is_main_process and args.validation_images is not None:
-        # log_validation(
-        #     vae,
-        #     text_encoder,
-        #     tokenizer,
-        #     unet,
-        #     args,
-        #     accelerator,
-        #     weight_dtype,
-        #     global_step,
-        # )
+        log_validation(
+            vae,
+            text_encoder,
+            tokenizer,
+            unet,
+            args,
+            accelerator,
+            weight_dtype,
+            global_step,
+        )
         pass
             
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -1226,14 +1241,25 @@ def main():
                 )
 
                 # Get the empty text embedding for conditioning
-                prompt = ""
-                text_inputs = tokenizer(
-                    prompt,
-                    padding="do_not_pad",
-                    max_length=tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                    prompt = ""
+                    text_inputs = tokenizer(
+                        prompt,
+                        padding="do_not_pad",
+                        max_length=tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    prompt = "Camera-space Normal"
+                    # from StableDiffusionAOVMatEstPipeline::_encode_prompt
+                    text_inputs = tokenizer(
+                        prompt,
+                        padding="max_length",
+                        max_length=tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
                 text_input_ids = text_inputs.input_ids.to(target_latents.device)
                 encoder_hidden_states = text_encoder(text_input_ids, return_dict=False)[0]
                 encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
@@ -1249,8 +1275,13 @@ def main():
                 task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
 
                 # Predict
-                model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False,
-                                class_labels=task_emb)[0]
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                    # lotus used class_embed_type="projection" in the unet
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False,
+                                    class_labels=task_emb)[0]
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    # ValueError: class_labels should be provided when num_class_embeds > 0
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # rgb2x uses prompt to control instead of class_labels
 
                 # Compute loss
                 anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
