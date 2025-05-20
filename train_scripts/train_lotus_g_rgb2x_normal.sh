@@ -56,4 +56,5 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
+  --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest"
