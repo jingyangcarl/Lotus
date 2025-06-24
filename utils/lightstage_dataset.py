@@ -59,7 +59,7 @@ class LightstageDataset(Dataset):
         self.windows = []
         
         print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
-        for _, row in enumerate(tqdm(metadata[:1000], desc='loading metadata')):
+        for _, row in enumerate(tqdm(metadata, desc='loading metadata')):
             
             if row['l'] <= 1 or row['l'] >= 348:
                 # 2+346+2, 3,695,650 samples

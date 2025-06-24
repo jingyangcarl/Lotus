@@ -424,7 +424,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # https://huggingface.co/docs/peft/main/en/package_reference/lora
         # disable lora adapter to validate the training is conducted on unet only
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
-        unet.disable_adapters()
+        # unet.disable_adapters()
         pass
     
     # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
@@ -490,7 +490,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
         # when using lora, remember to enable the adapters after disabling, otherwise, trainning will failed
-        unet.enable_adapters()
+        # unet.enable_adapters()
         pass
         
     torch.cuda.empty_cache()
@@ -1225,7 +1225,7 @@ def main():
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
     logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
-    logger.info(f"Dataset probabilities: {probs}")
+    logger.info(f"  Dataset probabilities: {probs}")
     # logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
     # logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
     # logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
@@ -1300,7 +1300,8 @@ def main():
         log_ann_loss = 0.0
         log_rgb_loss = 0.0
 
-        for _ in range(len(train_dataloader_hypersim)):
+        # for _ in range(len(train_dataloader_hypersim)):
+        for _ in range(len(train_dataloader_lightstage)):
             if args.mix_dataset:
                 if random.random() < args.prob_hypersim:
                     batch = next(iter_hypersim)
@@ -1552,7 +1553,7 @@ def main():
         
         if args.use_lora:
             unet_lora_state_dict = convert_state_dict_to_diffusers(
-                get_peft_model_state_dict(unet)
+                get_peft_model_state_dict(unet, adapter_name='lora_lotus')
             )
             LotusGPipeline.save_lora_weights(
                 save_directory=args.output_dir,
