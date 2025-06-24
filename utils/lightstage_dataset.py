@@ -23,16 +23,22 @@ class LightstageDataset(Dataset):
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_debug.json'
         
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
+        img_ext = 'exr' # 'exr' or 'jpg'
         # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
-        meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
-        self.dataset_dir = f'{self.root_dir}/datasets/exr/{v}/{v}_2'
+        # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
+        meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.csv'
+        self.dataset_dir = f'{self.root_dir}/datasets/{img_ext}/{v}/{v}_2'
         self.img_dir = f'{self.root_dir}/Processed/{v}/{v}_2'
-        self.olat_dir = f'{self.root_dir}/Redline/exr/{v}/{v}_2'
+        self.olat_dir = f'{self.root_dir}/Redline/{img_ext}/{v}/{v}_2'
         self.cam_dir = f'{self.root_dir}/Redline/exr/{v}/{v}_2/cameras'
         
         # load json file
+        metadata = []
         with open(meta_data_path) as f:
-            metadata = json.load(f)
+            if '.json' in meta_data_path:
+                metadata = json.load(f)
+            elif '.csv' in meta_data_path:
+                metadata = pd.read_csv(f).to_dict(orient='records')
         
         self.omega_i_world = self.get_olat()
         # self.bbox_setting = self.init_bbox()
@@ -41,6 +47,8 @@ class LightstageDataset(Dataset):
         self.objs = []
         self.camera_paths = []
         self.static_paths = []
+        self.static_cross_paths = []
+        self.static_parallel_paths = []
         self.cross_paths = []
         self.parallel_paths = []
         self.albedo_paths = []
@@ -51,7 +59,7 @@ class LightstageDataset(Dataset):
         self.windows = []
         
         print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
-        for _, row in enumerate(tqdm(metadata, desc='loading metadata')):
+        for _, row in enumerate(tqdm(metadata[:1000], desc='loading metadata')):
             
             if row['l'] <= 1 or row['l'] >= 348:
                 # 2+346+2, 3,695,650 samples
@@ -64,17 +72,22 @@ class LightstageDataset(Dataset):
             self.objs.append(row["obj"])
             
             camera_path = os.path.join(self.cam_dir, f'camera{row["cam"]:02d}.txt')
-            static_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static', f'{row["i"]}_{row["j"]}.exr')
-            cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.exr')
-            parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.exr')
-            albedo_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'albedo', f'{row["i"]}_{row["j"]}.exr')
-            normal_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'normal', f'{row["i"]}_{row["j"]}.exr')
-            specular_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'specular', f'{row["i"]}_{row["j"]}.exr')
-            sigma_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'sigma', f'{row["i"]}_{row["j"]}.exr')
+            static_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static', f'{row["i"]}_{row["j"]}.{img_ext}')
+            static_cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_cross', f'{row["i"]}_{row["j"]}.{img_ext}')
+            static_parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_parallel', f'{row["i"]}_{row["j"]}.{img_ext}')
+            cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{img_ext}')
+            parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{img_ext}')
+            albedo_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'albedo', f'{row["i"]}_{row["j"]}.{img_ext}')
+            normal_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'normal', f'{row["i"]}_{row["j"]}.{img_ext}')
+            specular_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'specular', f'{row["i"]}_{row["j"]}.{img_ext}')
+            sigma_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'sigma', f'{row["i"]}_{row["j"]}.{img_ext}')
             
             # check if the paths are valid, 42k examples took 2min, remove from this and add a preprocess check
+            # this only need to be enabled once, disable later to save time
             # assert os.path.isfile(camera_path), f'{camera_path} is not valid'
             # assert os.path.isfile(static_path), f'{static_path} is not valid'
+            # assert os.path.isfile(static_cross_path), f'{static_cross_path} is not valid'
+            # assert os.path.isfile(static_parallel_path), f'{static_parallel_path} is not valid'
             # assert os.path.isfile(cross_path), f'{cross_path} is not valid'
             # assert os.path.isfile(parallel_path), f'{parallel_path} is not valid'
             # assert os.path.isfile(albedo_path), f'{albedo_path} is not valid'
@@ -84,6 +97,8 @@ class LightstageDataset(Dataset):
 
             self.camera_paths.append(camera_path)
             self.static_paths.append(static_path)
+            self.static_cross_paths.append(static_cross_path)
+            self.static_parallel_paths.append(static_parallel_path)
             self.cross_paths.append(cross_path)
             self.parallel_paths.append(parallel_path)
             self.albedo_paths.append(albedo_path)

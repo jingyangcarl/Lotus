@@ -124,7 +124,7 @@
             "program": "${workspaceFolder}/train_lotus_g_rgb2x.py",
             "console": "integratedTerminal",
             "env": {
-                "CUDA_VISIBLE_DEVICES": "7",
+                "CUDA_VISIBLE_DEVICES": "1",
             },
             "args": [
                 // "--pretrained_model_name_or_path=stabilityai/stable-diffusion-2-base",
@@ -134,7 +134,8 @@
                 "--train_data_dir_vkitti=/labworking/Users_A-L/jyang/data/lotus/vkitti",
                 "--resolution_vkitti=375",
                 "--prob_hypersim=0.",
-                // "--prob_vkitti=0.",
+                "--prob_vkitti=0.",
+                "--prob_lightstage=1.",
                 "--mix_dataset",
                 "--random_flip",
                 "--norm_type=trunc_disparity",
@@ -161,7 +162,6 @@
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest",
                 "--use_lora",
-
             ],
             "justMyCode": true
         },

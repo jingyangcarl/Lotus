@@ -25,6 +25,7 @@ from pathlib import Path
 from PIL import Image
 from glob import glob
 from easydict import EasyDict
+import time
 
 import accelerate
 import datasets
@@ -53,19 +54,25 @@ from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+from peft import get_peft_model, LoraConfig, TaskType
+from peft.utils import get_peft_model_state_dict
+from diffusers.utils import convert_state_dict_to_diffusers
 
-from pipeline import LotusGPipeline
+from pipeline import LotusGPipeline, LotusGMultistepsPipeline
+from utils.image_utils import concatenate_images, colorize_depth_map
+from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
+from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
+from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
+from utils.empty_dataset import EmptyDataset
+
+from eval import evaluation_depth, evaluation_normal
+
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from rgbx.rgb2x.pipeline_rgb2x import StableDiffusionAOVMatEstPipeline
 from rgbx.rgb2x.load_image import load_exr_image, load_ldr_image
 # from ..rgbx.rgb2x.pipeline_rgb2x import StableDiffusionAOVMatEstPipeline
 # from ..rgbx.rgb2x.load_image import load_exr_image, load_ldr_image
-from utils.image_utils import concatenate_images, colorize_depth_map
-from utils.hypersim_dataset import get_hypersim_dataset_depth_normal
-from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkitti
-
-from eval import evaluation_depth, evaluation_normal
 
 import tensorboard
 
@@ -408,9 +415,21 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         generator = None
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+        
+    if args.use_lora:
+        
+        # https://huggingface.co/docs/diffusers/using-diffusers/loading_adapters
+        # https://huggingface.co/docs/transformers/main/en/peft
+        # https://huggingface.co/docs/transformers/v4.43.2/peft
+        # https://huggingface.co/docs/peft/main/en/package_reference/lora
+        # disable lora adapter to validate the training is conducted on unet only
+        # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
+        unet.disable_adapters()
+        pass
     
-    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
-
+    # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+    
         # Load pipeline
         scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         scheduler.register_to_config(prediction_type=args.prediction_type)
@@ -466,6 +485,13 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         rgb2x_photos(pipeline_rgb2x, task, args, step, accelerator, generator)
 
         del pipeline_rgb2x
+        
+        
+    if args.use_lora:
+        # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
+        # when using lora, remember to enable the adapters after disabling, otherwise, trainning will failed
+        unet.enable_adapters()
+        pass
         
     torch.cuda.empty_cache()
 
@@ -571,6 +597,16 @@ def parse_args():
         "--prob_hypersim",
         type=float,
         default=0.9,
+    )
+    parser.add_argument(
+        "--prob_vkitti",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--prob_lightstage",
+        type=float,
+        default=0.0,
     )
     parser.add_argument(
         "--mix_dataset",
@@ -771,6 +807,11 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
+    parser.add_argument(
+        "--use_lora",
+        action="store_true",
+        help="Whether to use LoRA for training. If True, LoRA will be used for all models.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -912,11 +953,36 @@ def main():
         _new_conv_in.weight = nn.Parameter(_weight)
         _new_conv_in.bias = nn.Parameter(_bias)
         unet.conv_in = _new_conv_in
-    elif 'rgb-to-x':
+    elif 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
         unet = UNet2DConditionModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
             low_cpu_mem_usage=False, device_map=None,
         )
+    elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+        unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
+            low_cpu_mem_usage=False, device_map=None,
+        )
+        
+    # Apply LoRA to all attention processors
+    if args.use_lora:
+        # https://huggingface.co/docs/peft/v0.8.0/en/package_reference/lora
+        # https://huggingface.co/docs/diffusers/en/training/lora
+        # https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image_lora.py
+        lora_rank = 8
+        unet_lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_rank,
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+        
+        # freeze parameters of models to save more memory
+        unet.requires_grad_(False)
+        
+        # Add adapter and make sure the trainable params are in float32.
+        unet.add_adapter(unet_lora_config, adapter_name = 'lora_lotus')
+        lora_layers = filter(lambda p: p.requires_grad, unet.parameters())
 
     # Freeze vae and text_encoder and set unet to trainable
     vae.requires_grad_(False)
@@ -987,50 +1053,118 @@ def main():
         optimizer_cls = bnb.optim.AdamW8bit
     else:
         optimizer_cls = torch.optim.AdamW
+        
+    if args.use_lora:
+        # Only train LoRA parameters
+        optimizer = optimizer_cls(
+            lora_layers,
+            lr=args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.adam_weight_decay,
+            eps=args.adam_epsilon,
+        )
+    else:
+        optimizer = optimizer_cls(
+            unet.parameters(),
+            lr=args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.adam_weight_decay,
+            eps=args.adam_epsilon,
+        )
 
-    optimizer = optimizer_cls(
-        unet.parameters(),
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
-    )
+    # -----------------Loading Datasets-----------------
+    # automatically fallback to no mix_dataset when only one dataset has positive probability
+    probs = {
+        "hypersim": args.prob_hypersim,
+        "vkitti": args.prob_vkitti,
+        "lightstage": args.prob_lightstage,
+    }
+    probs_sum = sum(probs.values())
+    if probs_sum <= 0:
+        assert probs_sum <= 0, (
+            "All dataset probabilities are set to 0. If you want to use only Hypersim dataset, please set `mix_dataset` to False."
+        )
+    else:
+        # normalize the probabilities to sum up to 1
+        probs = {k: v / probs_sum for k, v in probs.items()}
+
+    # when use args.mix_dataset, check if at least two datasets have positive probability
+    # if not, set args.mix_dataset to False
+    if args.mix_dataset:
+        if sum(1 for v in probs.values() if v > 0) < 2:
+            logger.warning(
+                "Only one dataset has positive probability. Setting `mix_dataset` to False."
+            )
+            args.mix_dataset = False
 
     # Get the datasets and dataloaders.
     # -------------------- Dataset1: Hypersim --------------------
-    train_hypersim_dataset, preprocess_train_hypersim, collate_fn_hypersim = get_hypersim_dataset_depth_normal(
-        args.train_data_dir_hypersim, args.resolution_hypersim, args.random_flip, 
-        norm_type=args.norm_type, truncnorm_min=args.truncnorm_min, align_cam_normal=args.align_cam_normal
-        )
-    with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            train_hypersim_dataset = train_hypersim_dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        train_dataset_hypersim = train_hypersim_dataset.with_transform(preprocess_train_hypersim)
+    if probs["hypersim"] > 0:
+        tik = time.time()
+        train_hypersim_dataset, preprocess_train_hypersim, collate_fn_hypersim = get_hypersim_dataset_depth_normal(
+            args.train_data_dir_hypersim, args.resolution_hypersim, args.random_flip, 
+            norm_type=args.norm_type, truncnorm_min=args.truncnorm_min, align_cam_normal=args.align_cam_normal
+            )
+        with accelerator.main_process_first():
+            if args.max_train_samples is not None:
+                train_hypersim_dataset = train_hypersim_dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
+            # Set the training transforms
+            train_dataset_hypersim = train_hypersim_dataset.with_transform(preprocess_train_hypersim)
 
-    train_dataloader_hypersim = torch.utils.data.DataLoader(
-        train_dataset_hypersim,
-        shuffle=True,
-        collate_fn=collate_fn_hypersim,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-        pin_memory=True
-    )
-    # -------------------- Dataset2: VKITTI --------------------
-    transform_vkitti = VKITTITransform(random_flip=args.random_flip)
-    train_dataset_vkitti = VKITTIDataset(args.train_data_dir_vkitti, transform_vkitti, args.norm_type, truncnorm_min=args.truncnorm_min)
-    train_dataloader_vkitti = torch.utils.data.DataLoader(
-        train_dataset_vkitti, 
-        shuffle=True,
-        collate_fn=collate_fn_vkitti,
-        batch_size=args.train_batch_size, 
-        num_workers=args.dataloader_num_workers,
-        pin_memory=True
+        train_dataloader_hypersim = torch.utils.data.DataLoader(
+            train_dataset_hypersim,
+            shuffle=True,
+            collate_fn=collate_fn_hypersim,
+            batch_size=args.train_batch_size,
+            num_workers=args.dataloader_num_workers,
+            pin_memory=True
         )
+        print("Loading hypersim dataset takes: ", time.time()-tik)
+    else:
+        train_dataset_hypersim = EmptyDataset()
+        train_dataloader_hypersim = torch.utils.data.DataLoader(train_dataset_hypersim)
+        print("Skipping hypersim dataset as its probability is set to 0.")
+    # -------------------- Dataset2: VKITTI --------------------
+    if probs["vkitti"] > 0:
+        tik = time.time()
+        transform_vkitti = VKITTITransform(random_flip=args.random_flip)
+        train_dataset_vkitti = VKITTIDataset(args.train_data_dir_vkitti, transform_vkitti, args.norm_type, truncnorm_min=args.truncnorm_min)
+        train_dataloader_vkitti = torch.utils.data.DataLoader(
+            train_dataset_vkitti, 
+            shuffle=True,
+            collate_fn=collate_fn_vkitti,
+            batch_size=args.train_batch_size, 
+            num_workers=args.dataloader_num_workers,
+            pin_memory=True
+            )
+        print("Loading vkitti dataset takes: ", time.time()-tik)
+    else:
+        train_dataset_vkitti = EmptyDataset()
+        train_dataloader_vkitti = torch.utils.data.DataLoader(train_dataset_hypersim)
+        print("Skipping vkitti dataset as its probability is set to 0.")
+    
+    # -------------------- Dataset4: Lightstage --------------------
+    if probs["lightstage"] > 0:
+        tik = time.time()
+        train_dataset_lightstage = LightstageDataset()
+        train_dataloader_lightstage = torch.utils.data.DataLoader(
+            train_dataset_lightstage,
+            shuffle=True,
+            collate_fn=collate_fn_lightstage,
+            batch_size=args.train_batch_size,
+            num_workers=args.dataloader_num_workers,
+            pin_memory=True
+        )
+        print("Loading lightstage dataset takes: ", time.time()-tik)
+    else:
+        train_dataset_lightstage = EmptyDataset()
+        train_dataloader_lightstage = torch.utils.data.DataLoader(train_dataset_lightstage)
+        print("Skipping lightstage dataset as its probability is set to 0.")
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
+    # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*probs['hypersim'] + len(train_dataloader_vkitti)*probs['vkitti'] + len(train_dataloader_lightstage)*probs['lightstage']) / args.gradient_accumulation_steps)
     assert args.max_train_steps is not None or args.num_train_epochs is not None, "max_train_steps or num_train_epochs should be provided"
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -1044,8 +1178,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, lr_scheduler
+    unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler
     )
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1063,7 +1197,8 @@ def main():
     vae.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
+    # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*probs['hypersim'] + len(train_dataloader_vkitti)*probs['vkitti'] + len(train_dataloader_lightstage)*probs['lightstage']) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
@@ -1088,8 +1223,12 @@ def main():
     logger.info("***** Running training *****")
     logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
     logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
+    logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
-    logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
+    logger.info(f"Dataset probabilities: {probs}")
+    # logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
+    # logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
+    # logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1155,6 +1294,7 @@ def main():
     for epoch in range(first_epoch, args.num_train_epochs):
         iter_hypersim = iter(train_dataloader_hypersim)
         iter_vkitti = iter(train_dataloader_vkitti)
+        iter_lightstage = iter(train_dataloader_lightstage)
 
         train_loss = 0.0
         log_ann_loss = 0.0
@@ -1174,7 +1314,8 @@ def main():
                         iter_vkitti = iter(train_dataloader_vkitti)
                         batch = next(iter_vkitti)
             else:
-                batch = next(iter_hypersim)
+                # batch = next(iter_hypersim)
+                batch = next(iter_lightstage)
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space
@@ -1225,8 +1366,21 @@ def main():
                     new_noise = noise + args.input_perturbation * torch.randn_like(noise)
                 
                 # Set timestep
-                timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
-                timesteps = timesteps.long()
+                # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+                    # original single step
+                    timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
+                    timesteps = timesteps.long()
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    # multiple timesteps
+                    if args.seed is None:
+                        generator = None
+                    else:
+                        generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+                    
+                    # Sample a random timestep for each image
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long()
+                    pass
                 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
@@ -1241,7 +1395,8 @@ def main():
                 )
 
                 # Get the empty text embedding for conditioning
-                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
                     prompt = ""
                     text_inputs = tokenizer(
                         prompt,
@@ -1252,6 +1407,7 @@ def main():
                     )
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     prompt = "Camera-space Normal"
+                    # prompt = ""
                     # from StableDiffusionAOVMatEstPipeline::_encode_prompt
                     text_inputs = tokenizer(
                         prompt,
@@ -1267,18 +1423,18 @@ def main():
                 # Get the target for loss
                 target = target_latents
 
-                # Get the task embedding
-                task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
-                task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
-                task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
-                task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
-                task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
-
                 # Predict
-                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+                    # Get the task embedding
+                    task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
+                    task_emb_anno = torch.cat([torch.sin(task_emb_anno), torch.cos(task_emb_anno)], dim=-1).repeat(bsz_per_task, 1)
+                    task_emb_rgb = torch.tensor([0, 1]).float().unsqueeze(0).to(accelerator.device)
+                    task_emb_rgb = torch.cat([torch.sin(task_emb_rgb), torch.cos(task_emb_rgb)], dim=-1).repeat(bsz_per_task, 1)
+                    task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
+
                     # lotus used class_embed_type="projection" in the unet
-                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False,
-                                    class_labels=task_emb)[0]
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False, class_labels=task_emb)[0]
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # ValueError: class_labels should be provided when num_class_embeds > 0
                     model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # rgb2x uses prompt to control instead of class_labels
@@ -1286,6 +1442,7 @@ def main():
                 # Compute loss
                 anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
                 rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
+                # rgb_loss *= 0.
                 loss = anno_loss + rgb_loss
 
                 # Gather loss
@@ -1349,6 +1506,18 @@ def main():
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
+                        
+                        if args.use_lora:
+                            unwrapped_unet = unwrap_model(unet)
+                            unet_lora_state_dict = convert_state_dict_to_diffusers(
+                                get_peft_model_state_dict(unwrapped_unet, adapter_name='lora_lotus')
+                            )
+                            
+                            LotusGPipeline.save_lora_weights(
+                                save_directory=save_path,
+                                unet_lora_layers=unet_lora_state_dict,
+                                safe_serialization=True,
+                            )
                 
                     if global_step % validation_steps == 0:
                         log_validation(
@@ -1361,6 +1530,7 @@ def main():
                             weight_dtype,
                             global_step,
                         )
+                        pass
 
             if global_step >= args.max_train_steps:
                 break
@@ -1379,6 +1549,16 @@ def main():
             variant=args.variant,
         )
         pipeline.save_pretrained(args.output_dir)
+        
+        if args.use_lora:
+            unet_lora_state_dict = convert_state_dict_to_diffusers(
+                get_peft_model_state_dict(unet)
+            )
+            LotusGPipeline.save_lora_weights(
+                save_directory=args.output_dir,
+                unet_lora_layers=unet_lora_state_dict,
+                safe_serialization=True,
+            )
 
     accelerator.end_training()
 
