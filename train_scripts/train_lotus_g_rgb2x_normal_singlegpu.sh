@@ -17,7 +17,7 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=6
 
 # model configs
 export TIMESTEP=999
@@ -63,4 +63,5 @@ accelerate launch --mixed_precision="fp16" \
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
-  --use_lora
+  --use_lora \
+  --save_pred_vis
