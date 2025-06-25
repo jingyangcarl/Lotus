@@ -16,7 +16,9 @@ class LightstageTransform:
 
 class LightstageDataset(Dataset):
 
-    def __init__(self):
+    def __init__(self, split='train', tasks='', eval_first_n=None):
+
+        assert split in ['train', 'test'], f'Invalid split: {split}'
         
         v = 'v1.3'
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_half.json'
@@ -59,16 +61,38 @@ class LightstageDataset(Dataset):
         self.windows = []
         
         print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
-        for _, row in enumerate(tqdm(metadata, desc='loading metadata')):
+        for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')):
             
+            # general filter
             if row['l'] <= 1 or row['l'] >= 348:
                 # 2+346+2, 3,695,650 samples
                 continue
+
+            # task specific filter
+            task = tasks[0] if len(tasks) == 1 else tasks
+            if task == 'normal':
+                # when task is normal only, filter out the lighting
+                if row['l'] != 2:
+                    continue
+                else:
+                    pass # only pass the l==2 # verify the diffuse specular removal, 10559 samples
+            else:
+                raise NotImplementedError(f'Task {task} is not implemented')
+
+            # we use first 0.8 of the data for training, and last 0.2 for validation
+            train_eval_split = 0.95
+            if split == 'train':
+                if rowidx / len(metadata) >= train_eval_split:
+                    continue
+                else:
+                    pass
+            elif split == 'test':
+                if rowidx / len(metadata) < train_eval_split:
+                    continue
+                else:
+                    pass
             
-            if row['l'] != 2:
-                continue # verify the diffuse specular removal, 10559 samples
-            
-            self.texts.append(row["obj"])
+            self.texts.append(row)
             self.objs.append(row["obj"])
             
             camera_path = os.path.join(self.cam_dir, f'camera{row["cam"]:02d}.txt')
@@ -108,7 +132,21 @@ class LightstageDataset(Dataset):
             
             self.omega_i.append(self.omega_i_world[row['l']-2]) # 2+346+2
             self.windows.append((row['i'], row['j'], row['res']))
-            
+
+        # when enable quick_val, get the first 10 samples
+        if eval_first_n:
+            self.texts = self.texts[:eval_first_n]
+            self.objs = self.objs[:eval_first_n]
+            self.camera_paths = self.camera_paths[:eval_first_n]
+            self.static_paths = self.static_paths[:eval_first_n]
+            self.static_cross_paths = self.static_cross_paths[:eval_first_n]
+            self.static_parallel_paths = self.static_parallel_paths[:eval_first_n]
+            self.cross_paths = self.cross_paths[:eval_first_n]
+            self.parallel_paths = self.parallel_paths[:eval_first_n]
+            self.albedo_paths = self.albedo_paths[:eval_first_n]
+            self.normal_paths = self.normal_paths[:eval_first_n]
+            self.specular_paths = self.specular_paths[:eval_first_n]
+            self.sigma_paths = self.sigma_paths[:eval_first_n]
         
         self.transforms = transforms.Compose(
             [
@@ -462,6 +500,8 @@ class LightstageDataset(Dataset):
         
         # check
         example['text'] = self.texts[idx]
+        example['obj_name'] = self.objs[idx]
+        example['obj_material'] = ''
         example['camera_path'] = self.camera_paths[idx]
         example['static_path'] = self.static_paths[idx]
         example['cross_path'] = self.cross_paths[idx]

@@ -65,7 +65,7 @@ from utils.vkitti_dataset import VKITTIDataset, VKITTITransform, collate_fn_vkit
 from utils.lightstage_dataset import LightstageDataset, LightstageTransform, collate_fn_lightstage
 from utils.empty_dataset import EmptyDataset
 
-from eval import evaluation_depth, evaluation_normal
+from eval import evaluation_depth, evaluation_normal, evaluation_material
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -84,79 +84,37 @@ logger = get_logger(__name__, log_level="INFO")
 TOP5_STEPS_DEPTH = []
 TOP5_STEPS_NORMAL = []
 
-def rgb2x_photos(
-    pipeline,
-    task,
-    args,
-    step,
-    accelerator,
-    generator,
-    inference_step = 50,
-    num_samples = 1
-):
-    
-    validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
-    validation_images = sorted(validation_images)
-    print(validation_images)
-    
-    pred_annos = []
-    input_images = []
-    
-    for i in tqdm(range(len(validation_images)), desc="Processing validation images"):
-        photo, preds, prompts = rgb2x(
-            pipeline, 
-            validation_images[i], 
-            accelerator,
-            generator,
-            inference_step, 
-            num_samples
-        )
+def load_image(img_path):
+    # default rgb2x image loader
 
-        assert len(preds) == len(prompts), "Number of images and prompts should be equal."
-        for i, (pred, prompt) in enumerate(zip(preds, prompts)):
-            pred_annos.append(pred[0])
+    if img_path.endswith(".exr"):
+        photo = load_exr_image(img_path, tonemaping=True, clamp=True)
+    elif (
+        img_path.endswith(".png")
+        or img_path.endswith(".jpg")
+        or img_path.endswith(".jpeg")
+    ):
+        photo = load_ldr_image(img_path, from_srgb=True)
         
-        # tensor to PIL and convert to RGB
-        # photo = (photo * 0.5 + 0.5).clamp(0, 1)
-        photo = (photo * 255).to(torch.uint8)
-        photo = photo.permute(1, 2, 0).cpu().numpy()
-        photo = Image.fromarray(photo)
-        photo = photo.resize((pred[0].size), Image.LANCZOS)
-        input_images.append(photo)
+        # if resolution is over 1k, downsample to less than 1k
+        if photo.shape[1] > 512: # photo in shape 3, H, W
+            downsize = 512 / photo.shape[1]
+            photo = torchvision.transforms.Resize((int(photo.shape[1] * downsize), int(photo.shape[2] * downsize)))(photo)
+
+    return photo
         
-    # based on tasks, split the pred_annos lists based on the number of tasks
-    # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
-    pred_annos = [pred_annos[i::len(prompts)] for i in range(len(prompts))]
-    
-    # Save output
-    save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
-    save_dir = os.path.join(args.output_dir,'images')
-    os.makedirs(save_dir, exist_ok=True)
-    save_output.save(os.path.join(save_dir, f'{step:05d}.jpg'))
 
 def rgb2x(
+    img_path,
     pipeline,
-    photo_path,
     accelerator,
     generator,
     inference_step = 50,
     num_samples = 1,
 ):
     # generator = torch.Generator(device="cuda").manual_seed(seed)
-
-    if photo_path.endswith(".exr"):
-        photo = load_exr_image(photo_path, tonemaping=True, clamp=True).to(accelerator.device)
-    elif (
-        photo_path.endswith(".png")
-        or photo_path.endswith(".jpg")
-        or photo_path.endswith(".jpeg")
-    ):
-        photo = load_ldr_image(photo_path, from_srgb=True).to(accelerator.device)
-        
-        # if resolution is over 1k, downsample to less than 1k
-        if photo.shape[1] > 512: # photo in shape 3, H, W
-            downsize = 512 / photo.shape[1]
-            photo = torchvision.transforms.Resize((int(photo.shape[1] * downsize), int(photo.shape[2] * downsize)))(photo)
+    
+    photo = load_image(img_path).to(accelerator.device)
 
     # Check if the width and height are multiples of 8. If not, crop it using torchvision.transforms.CenterCrop
     old_height = photo.shape[1]
@@ -210,7 +168,113 @@ def rgb2x(
 
     return photo, return_list, prompts
 
-def run_example_validation(pipeline, task, args, step, accelerator, generator):
+def run_rgb2x_example_validation(
+    pipeline,
+    task,
+    args,
+    step,
+    accelerator,
+    generator,
+    inference_step = 50,
+    num_samples = 1,
+    model_alias = 'model'
+):
+    
+    validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
+    validation_images = sorted(validation_images)
+    print(validation_images)
+    
+    pred_annos = []
+    input_images = []
+    
+    for i in tqdm(range(len(validation_images)), desc="Processing validation images"):
+        photo, preds, prompts = rgb2x(
+            validation_images[i], 
+            pipeline, 
+            accelerator,
+            generator,
+            inference_step, 
+            num_samples
+        )
+
+        assert len(preds) == len(prompts), "Number of images and prompts should be equal."
+        for i, (pred, prompt) in enumerate(zip(preds, prompts)):
+            pred_annos.append(pred[0])
+        
+        # tensor to PIL and convert to RGB
+        # photo = (photo * 0.5 + 0.5).clamp(0, 1)
+        photo = (photo * 255).to(torch.uint8)
+        photo = photo.permute(1, 2, 0).cpu().numpy()
+        photo = Image.fromarray(photo)
+        photo = photo.resize((pred[0].size), Image.LANCZOS)
+        input_images.append(photo)
+        
+    # based on tasks, split the pred_annos lists based on the number of tasks
+    # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
+    pred_annos = [pred_annos[i::len(prompts)] for i in range(len(prompts))]
+    
+    # Save output
+    save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
+    save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val')
+    os.makedirs(save_dir, exist_ok=True)
+    save_output.save(os.path.join(save_dir, f'{model_alias}.jpg'))
+
+def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=10, model_alias=''):
+
+    if step >= 0:
+        test_data_dir = os.path.join(args.base_test_data_dir, task)
+        dataset_split_path = "evaluation/dataset_brdf"
+        eval_datasets = [('lightstage', 'test')]
+        eval_dir = os.path.join(args.output_dir, 'eval', f'step{step:05d}')
+
+        if 'rgb2x' in model_alias:
+            gen_prediction = rgb2x
+        elif 'lotus' in model_alias:
+            gen_prediction = gen_lotus_normal
+
+        eval_metrics = evaluation_material(eval_dir, test_data_dir, dataset_split_path, eval_mode="generate_prediction", 
+                                                gen_prediction=gen_prediction, pipeline=pipeline, accelerator=accelerator, generator=generator, 
+                                                eval_datasets=eval_datasets,
+                                                save_pred_vis=args.save_pred_vis, eval_first_n=eval_first_n, task=task, model_alias=model_alias)
+        
+    
+def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps=1):
+    if torch.backends.mps.is_available():
+            autocast_ctx = nullcontext()
+    else:
+        autocast_ctx = torch.autocast(pipe.device.type)
+
+    with autocast_ctx:
+        
+        # Preprocess validation image
+        img = load_image(img_path).to(accelerator.device)[None,...]
+        if 'exr' in img_path:
+            pass
+        else:
+            # img = Image.open(img_path).convert("RGB")
+            # img = np.array(img).astype(np.float32)
+            # img = torch.tensor(img).permute(2,0,1).unsqueeze(0) # (1,3,h,w)
+            # img = img / 127.5 - 1.0 # -1-1
+            # img = img.to(accelerator.device)
+
+            img = torch.tensor(img).permute(2,0,1).unsqueeze(0) # (1,3,h,w)
+            img = img / 2.0 - 1.0
+
+        task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(pipe.device)
+        task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+
+        pred_normal = pipe(
+                        rgb_in=img, # [-1,1] 
+                        task_emb=task_emb, 
+                        prompt=prompt, 
+                        num_inference_steps=num_inference_steps,
+                        timesteps=[999], # fixed time step or use generator instead
+                        output_type='pt',
+                        ).images[0] # [0,1], (3,h,w)
+        pred_normal = (pred_normal*2-1.0).unsqueeze(0) # [-1,1], (1,3,h,w)
+    return pred_normal
+
+def run_lotus_example_validation(pipeline, task, args, step, accelerator, generator, model_alias='model'):
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
     print(validation_images)
@@ -291,9 +355,9 @@ def run_example_validation(pipeline, task, args, step, accelerator, generator):
 
     # Save output
     save_output = concatenate_images(input_images, pred_annos)
-    save_dir = os.path.join(args.output_dir,'images')
+    save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val')
     os.makedirs(save_dir, exist_ok=True)
-    save_output.save(os.path.join(save_dir, f'{step:05d}.jpg'))
+    save_output.save(os.path.join(save_dir, f'{model_alias}.jpg'))
 
 def run_evaluation(pipeline, task, args, step, accelerator):
     # Define prediction functions
@@ -317,7 +381,7 @@ def run_evaluation(pipeline, task, args, step, accelerator):
                             ).images[0]
             pred_depth = pred_depth.mean(axis=-1) # [0,1]
         return pred_depth
-    
+
     def gen_normal(img, pipe, prompt="", num_inference_steps=1):
         if torch.backends.mps.is_available():
                 autocast_ctx = nullcontext()
@@ -407,17 +471,16 @@ def run_evaluation(pipeline, task, args, step, accelerator):
         else:
                 raise ValueError(f"Not Supported Task: {task}!")
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=2):
     logger.info("Running validation for task: %s... " % args.task_name[0])
     task = args.task_name[0]
-  
+
     if args.seed is None:
         generator = None
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
         
-    if args.use_lora:
-        
+    # if args.use_lora:
         # https://huggingface.co/docs/diffusers/using-diffusers/loading_adapters
         # https://huggingface.co/docs/transformers/main/en/peft
         # https://huggingface.co/docs/transformers/v4.43.2/peft
@@ -425,16 +488,22 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # disable lora adapter to validate the training is conducted on unet only
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
         # unet.disable_adapters()
-        pass
-    
-    # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
-    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
-    
+        # pass
+
+    def wrap_pipeline_lotus(pretrained_model_name_or_path, model_alias='', reload_unet=False, disable_lora_on_reference=False):
+
+        if reload_unet:
+            # reloading unet to preserver the pretrained results
+            unet = UNet2DConditionModel.from_pretrained(
+                pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
+                low_cpu_mem_usage=False, device_map=None,
+            )
+
         # Load pipeline
-        scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
         scheduler.register_to_config(prediction_type=args.prediction_type)
         pipeline = LotusGPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
+            pretrained_model_name_or_path,
             scheduler=scheduler,
             vae=accelerator.unwrap_model(vae),
             text_encoder=accelerator.unwrap_model(text_encoder),
@@ -452,16 +521,21 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             pipeline.enable_xformers_memory_efficient_attention()
     
         # Run example-validation
-        run_example_validation(pipeline, task, args, step, accelerator, generator)
+        run_lotus_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
     
         # Run evaluation
         # run_evaluation(pipeline, task, args, step, accelerator)
+        run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
         
         del pipeline
-    
-    elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+
+    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, model_alias='', disable_lora_on_reference=False):
+
+        if disable_lora_on_reference:
+            unet.disable_adapters()
+
         pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
+            pretrained_model_name_or_path,
             vae=accelerator.unwrap_model(vae),
             text_encoder=accelerator.unwrap_model(text_encoder),
             tokenizer=tokenizer,
@@ -481,17 +555,29 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             pipeline_rgb2x.enable_xformers_memory_efficient_attention()
             
         # photo_path = '/home/jyang/projects/ObjectReal/external/lotus/datasets/quick_validation/00.png'
-        # rgb2x(pipeline_rgb2x, photo_path)
-        rgb2x_photos(pipeline_rgb2x, task, args, step, accelerator, generator)
+        run_rgb2x_example_validation(pipeline_rgb2x, task, args, step, accelerator, generator, model_alias=model_alias)
+
+        run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
         del pipeline_rgb2x
+
+        if disable_lora_on_reference:
+            unet.enable_adapters()
+    
+    # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+        wrap_pipeline_lotus(args.pretrained_model_name_or_path)
+    
+    elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_finetune_lora')
+        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_original', disable_lora_on_reference=True) # default model output
+        wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', model_alias='lotus_original', reload_unet=True, disable_lora_on_reference=True) # default model output
         
-        
-    if args.use_lora:
+    # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
         # when using lora, remember to enable the adapters after disabling, otherwise, trainning will failed
         # unet.enable_adapters()
-        pass
+        # pass
         
     torch.cuda.empty_cache()
 
@@ -1146,7 +1232,7 @@ def main():
     # -------------------- Dataset4: Lightstage --------------------
     if probs["lightstage"] > 0:
         tik = time.time()
-        train_dataset_lightstage = LightstageDataset()
+        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name)
         train_dataloader_lightstage = torch.utils.data.DataLoader(
             train_dataset_lightstage,
             shuffle=True,

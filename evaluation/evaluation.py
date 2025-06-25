@@ -375,3 +375,135 @@ def evaluation_normal(eval_dir, base_data_dir, dataset_split_path, eval_mode="ge
 
         
     return metric_results
+
+
+def evaluation_material(
+        eval_dir, base_data_dir, dataset_split_path, eval_mode="generate_prediction", 
+        gen_prediction=None, pipeline=None, accelerator=None, generator=None, 
+        prediction_dir=None, processing_res=None,
+        eval_datasets=[('lightstage', 'test')],
+        save_pred_vis=False, eval_first_n=None, task='', model_alias='model'
+    ):
+    '''
+    if eval_mode == "load_prediction": assert prediction_dir is not None
+    elif eval_mode == "generate_prediction": assert gen_prediction is not None and pipeline is not None
+    '''
+    os.makedirs(eval_dir, exist_ok=True)
+    logging.info(f"processing_res: {processing_res}")
+
+    device = torch.device('cuda')
+    metric_results = {}
+    for dataset_name, split in eval_datasets:
+
+        if dataset_name == 'lightstage':
+            from utils.lightstage_dataset import LightstageDataset
+            samples = LightstageDataset(split=split, tasks=task, eval_first_n=eval_first_n)
+        print(f'Number of samples in {dataset_name} {split}: {len(samples)}')
+        test_loader = DataLoader(samples, 1, shuffle=False, num_workers=1, pin_memory=True)
+        
+        results_dir = None
+        total_normal_errors = None
+
+        output_dir = os.path.join(eval_dir, dataset_name, model_alias)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if save_pred_vis:
+            results_dir = os.path.join(output_dir, "vis")
+            os.makedirs(results_dir, exist_ok=True)
+            print(f"Saving visualizations to {results_dir}")
+
+        for data_dict in tqdm(test_loader):
+            #↓↓↓↓
+            #NOTE: forward pass
+            img = data_dict['static_value'].to(device) # [1, 3, h, w]
+            img_path = data_dict['static_path'][0] # e.g. 'lightstage/scene1/img1.png'
+            img_meta = data_dict['text']
+            intrins = None
+
+            # pad input
+            _, _, orig_H, orig_W = img.shape
+            lrtb = normal_utils.get_padding(orig_H, orig_W)
+            img, intrins = normal_utils.pad_input(img, intrins, lrtb)
+
+            # forward pass
+            # pred_list = model(img, intrins=intrins, mode='test')
+            # norm_out = pred_list[-1] # [1, 3, h, w]
+            if eval_mode == "load_prediction":
+                # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
+                pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta[0]}_norm.png')
+                norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
+                norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
+                norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(device) # torch.tensor([1, 3, h, w])
+
+            elif eval_mode == "generate_prediction":
+                # resize to processing_res
+                if processing_res is not None:
+                    input_size = img.shape
+                    img =  resize_max_res(
+                    img, max_edge_resolution=processing_res,
+                    # resample_method=resample_method,
+                    )
+                # norm_out = gen_prediction(img, pipeline) # [1, 3, h, w]
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
+                    norm_out = pred_ret[list(prompts_ret.keys()).index('normal')][0] # PIL
+                    norm_out = (np.asarray(norm_out).astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3]), [-1,1]
+                    norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(device) # torch.tensor([1, 3, h, w])
+                elif 'lotus' in model_alias:
+                    norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
+
+                # resize to original res
+                if processing_res is not None:
+                    norm_out = resize(norm_out, input_size[-2:], antialias=True, )
+
+            # crop the padded part
+            norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
+
+            pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+            #↑↑↑↑
+
+            if 'normal_value' in data_dict.keys():
+                gt_norm = data_dict['normal_value'].to(device)
+                # gt_norm_mask = data_dict['normal_mask'].to(device)
+                gt_norm_mask = data_dict['normal_mask'].to(device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
+
+                pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
+                if total_normal_errors is None:
+                    total_normal_errors = pred_error[gt_norm_mask]
+                    # total_normal_errors = pred_error
+                else:
+                    total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_norm_mask]), dim=0)
+                    # total_normal_errors = torch.cat((total_normal_errors, pred_error), dim=0)
+
+            if results_dir is not None:
+                # prefixs = ['%s_%s_%s_%s' % (o,l,i,j) for (o,l,i,j) in zip(img_meta['obj'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                vis_utils.visualize_normal(results_dir, prefixs, img, pred_norm, pred_kappa,
+                                        gt_norm, gt_norm_mask, pred_error)
+
+        metrics = None
+        if total_normal_errors is not None:
+            metrics = normal_utils.compute_normal_metrics(total_normal_errors)
+            print("Dataset: ", dataset_name)
+            print("mean median rmse 5 7.5 11.25 22.5 30")
+            print("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f" % (
+                metrics['mean'], metrics['median'], metrics['rmse'],
+                metrics['a1'], metrics['a2'], metrics['a3'], metrics['a4'], metrics['a5']))
+
+        metric_results[dataset_name] = metrics
+        # -------------------- Save metrics to file --------------------
+        eval_text = f"Evaluation metrics:\n\
+        on dataset: {dataset_name}\n"
+
+        eval_text += tabulate(
+        [metrics.keys(), metrics.values()]
+        )
+
+        _save_to = os.path.join(output_dir, "eval_metrics.txt")
+        with open(_save_to, "w+") as f:
+            f.write(eval_text)
+            logging.info(f"Evaluation metrics saved to {_save_to}")
+
+        
+    return metric_results

@@ -124,7 +124,7 @@
             "program": "${workspaceFolder}/train_lotus_g_rgb2x.py",
             "console": "integratedTerminal",
             "env": {
-                "CUDA_VISIBLE_DEVICES": "1",
+                "CUDA_VISIBLE_DEVICES": "6",
             },
             "args": [
                 // "--pretrained_model_name_or_path=stabilityai/stable-diffusion-2-base",
@@ -158,10 +158,11 @@
                 "--validation_steps=3",
                 "--checkpointing_steps=3",
                 "--base_test_data_dir=datasets/eval/",
-                "--output_dir=output/debug/train-rgb2x/",
+                "--output_dir=output/debug/train-rgb2x-lora/",
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest",
                 "--use_lora",
+                "--save_pred_vis"
             ],
             "justMyCode": true
         },

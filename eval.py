@@ -10,7 +10,7 @@ import numpy as np
 
 from pipeline import LotusGPipeline, LotusDPipeline
 from utils.seed_all import seed_all
-from evaluation.evaluation import evaluation_depth, evaluation_normal
+from evaluation.evaluation import evaluation_depth, evaluation_normal, evaluation_material
 
 check_min_version('0.28.0.dev0')
 
