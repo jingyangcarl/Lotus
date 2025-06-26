@@ -451,6 +451,12 @@ def evaluation_material(
                     norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(device) # torch.tensor([1, 3, h, w])
                 elif 'lotus' in model_alias:
                     norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
+                elif 'dsine' in model_alias:
+                    # Use the model to infer the normal map from the input image
+                    with torch.inference_mode():
+                        normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W)
+                        normal = (normal + 1.) / 2.  # Convert values to the range [0, 1]
+                    norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
 
                 # resize to original res
                 if processing_res is not None:

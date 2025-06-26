@@ -17,7 +17,7 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=0
 
 # model configs
 export TIMESTEP=999
@@ -29,7 +29,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_lora_lightstage"
+export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lora_lightstage_debug"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

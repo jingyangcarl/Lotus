@@ -25,7 +25,7 @@ class LightstageDataset(Dataset):
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_debug.json'
         
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
-        img_ext = 'exr' # 'exr' or 'jpg'
+        img_ext = 'jpg' # 'exr' or 'jpg'
         # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
         meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.csv'
@@ -535,6 +535,15 @@ class LightstageDataset(Dataset):
         normal = imageio.imread(normal_path)
         specular = imageio.imread(specular_path)
         sigma = imageio.imread(sigma_path)
+
+        # normalize to [0,1]
+        static = static if '.exr' in static_path else static / 255.0
+        cross = cross if '.exr' in cross_path else cross / 255.0
+        parallel = parallel if '.exr' in parallel_path else parallel / 255.0
+        albedo = albedo if '.exr' in albedo_path else albedo / 255.0
+        normal = normal if '.exr' in normal_path else normal / 255.0
+        specular = specular if '.exr' in specular_path else specular / 255.0
+        sigma = sigma if '.exr' in sigma_path else sigma / 255.0
         
         # hdr to ldr via Apply simple Reinhard tone mapping
         # static = self.tonemap.process(static)

@@ -68,6 +68,7 @@ from utils.empty_dataset import EmptyDataset
 from eval import evaluation_depth, evaluation_normal, evaluation_material
 
 import sys
+import cv2
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from rgbx.rgb2x.pipeline_rgb2x import StableDiffusionAOVMatEstPipeline
 from rgbx.rgb2x.load_image import load_exr_image, load_ldr_image
@@ -94,7 +95,7 @@ def load_image(img_path):
         or img_path.endswith(".jpg")
         or img_path.endswith(".jpeg")
     ):
-        photo = load_ldr_image(img_path, from_srgb=True)
+        photo = load_ldr_image(img_path, from_srgb=False)
         
         # if resolution is over 1k, downsample to less than 1k
         if photo.shape[1] > 512: # photo in shape 3, H, W
@@ -231,6 +232,8 @@ def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval
             gen_prediction = rgb2x
         elif 'lotus' in model_alias:
             gen_prediction = gen_lotus_normal
+        elif 'dsine' in model_alias:
+            gen_prediction = None
 
         eval_metrics = evaluation_material(eval_dir, test_data_dir, dataset_split_path, eval_mode="generate_prediction", 
                                                 gen_prediction=gen_prediction, pipeline=pipeline, accelerator=accelerator, generator=generator, 
@@ -247,18 +250,9 @@ def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps
     with autocast_ctx:
         
         # Preprocess validation image
+        # refer to run_lotus_example_validation, or train_lotus_g.py original implementation
         img = load_image(img_path).to(accelerator.device)[None,...]
-        if 'exr' in img_path:
-            pass
-        else:
-            # img = Image.open(img_path).convert("RGB")
-            # img = np.array(img).astype(np.float32)
-            # img = torch.tensor(img).permute(2,0,1).unsqueeze(0) # (1,3,h,w)
-            # img = img / 127.5 - 1.0 # -1-1
-            # img = img.to(accelerator.device)
-
-            img = torch.tensor(img).permute(2,0,1).unsqueeze(0) # (1,3,h,w)
-            img = img / 2.0 - 1.0
+        # img = img / 2.0 - 1.0 # [-1, 1]
 
         task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(pipe.device)
         task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
@@ -350,6 +344,44 @@ def run_lotus_example_validation(pipeline, task, args, step, accelerator, genera
                 
                 pred_annos.append(pred_normal)
                 
+    else:
+        raise ValueError(f"Not Supported Task: {args.task_name}!")
+
+    # Save output
+    save_output = concatenate_images(input_images, pred_annos)
+    save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val')
+    os.makedirs(save_dir, exist_ok=True)
+    save_output.save(os.path.join(save_dir, f'{model_alias}.jpg'))
+
+def run_dsine_example_validation(normal_predictor, task, args, step, accelerator, generator, model_alias='dsine'):
+    validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
+    validation_images = sorted(validation_images)
+    print(validation_images)
+    
+    pred_annos = []
+    input_images = []
+    
+    if task == "normal":
+        for i in range(len(validation_images)):
+            if torch.backends.mps.is_available():
+                autocast_ctx = nullcontext()
+            else:
+                autocast_ctx = torch.autocast(accelerator.device.type)
+
+            with autocast_ctx:
+                # photo = cv2.imread(validation_images[i], cv2.IMREAD_COLOR)
+                validation_image = Image.open(validation_images[i]).convert("RGB")
+                input_images.append(validation_image)
+                validation_image = np.array(validation_image).astype(np.float32)
+
+                # Use the model to infer the normal map from the input image
+                with torch.inference_mode():
+                    normal = normal_predictor.infer_cv2(validation_image)[0] # Output shape: (3, H, W)
+                    normal = (normal + 1.) / 2.  # Convert values to the range [0, 1]
+                normal = (normal * 255).cpu().numpy().astype(np.uint8).transpose(1, 2, 0) # Output shape: (H, W, 3)
+                normal = Image.fromarray(normal)  # Convert to PIL Image
+
+                pred_annos.append(normal)
     else:
         raise ValueError(f"Not Supported Task: {args.task_name}!")
 
@@ -490,7 +522,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # unet.disable_adapters()
         # pass
 
-    def wrap_pipeline_lotus(pretrained_model_name_or_path, model_alias='', reload_unet=False, disable_lora_on_reference=False):
+    def wrap_pipeline_lotus(pretrained_model_name_or_path, model_alias='model', reload_unet=False, disable_lora_on_reference=False):
 
         if reload_unet:
             # reloading unet to preserver the pretrained results
@@ -529,10 +561,13 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         
         del pipeline
 
-    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, model_alias='', disable_lora_on_reference=False):
+    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, model_alias='model', disable_lora_on_reference=False):
 
         if disable_lora_on_reference:
-            unet.disable_adapters()
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.disable_adapters() # multi-gpu
+            else:
+                unet.disable_adapters() # single gpu
 
         pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
             pretrained_model_name_or_path,
@@ -562,13 +597,27 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         del pipeline_rgb2x
 
         if disable_lora_on_reference:
-            unet.enable_adapters()
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.enable_adapters()
+            else:
+                unet.enable_adapters()
+
+    def wrap_pipeline_dsine(pretrained_model_name_or_path, model_alias='model'):
+        # https://github.com/baegwangbin/DSINE
+
+        normal_predictor = torch.hub.load("hugoycj/DSINE-hub", "DSINE", trust_repo=True)
+
+        run_dsine_example_validation(normal_predictor, task, args, step, accelerator, generator, model_alias=model_alias)
+
+        run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+
     
     # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
         wrap_pipeline_lotus(args.pretrained_model_name_or_path)
     
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+        wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine')
         wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_finetune_lora')
         wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_original', disable_lora_on_reference=True) # default model output
         wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', model_alias='lotus_original', reload_unet=True, disable_lora_on_reference=True) # default model output

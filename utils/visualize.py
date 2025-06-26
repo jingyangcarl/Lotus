@@ -97,7 +97,7 @@ def visualize_normal(target_dir, prefixs, img, pred_norm, pred_kappa,
         # img
         img_ = unnormalize(img[i, ...])
         target_path = '%s/%s_img.png' % (target_dir, prefixs[i])
-        plt.imsave(target_path, img_)
+        plt.imsave(target_path, img[i, ...])
 
         # pred_norm 
         target_path = '%s/%s_norm.png' % (target_dir, prefixs[i])

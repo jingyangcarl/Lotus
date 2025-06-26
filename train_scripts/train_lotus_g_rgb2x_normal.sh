@@ -28,7 +28,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_lora_lightstage_debug"
+export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_multigpu_lora_lightstage_debug"
 
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13226" \
