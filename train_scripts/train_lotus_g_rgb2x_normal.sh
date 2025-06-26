@@ -4,11 +4,13 @@
 export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
-export TRAIN_DATA_DIR_HYPERSIM=/labworking/Users/jyang/data/hypersim/for_lotus
-export TRAIN_DATA_DIR_VKITTI=/labworking/Users_A-L/jyang/data/lotus/vkitti
+export TRAIN_DATA_DIR_HYPERSIM=/home/ICT2000/jyang/data/hypersim/for_lotus
+export TRAIN_DATA_DIR_VKITTI=/home/ICT2000/jyang/data/vkitti
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=1
+export P_HYPERSIM=0
+export P_VKITTI=0
+export P_LIGHTSTAGE=1
 
 # training configs
 export BATCH_SIZE=4
@@ -26,7 +28,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_lora/"
+export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_lora_lightstage_debug"
 
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -37,6 +39,8 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --train_data_dir_vkitti=$TRAIN_DATA_DIR_VKITTI \
   --resolution_vkitti=$RES_VKITTI \
   --prob_hypersim=$P_HYPERSIM \
+  --prob_vkitti=$P_VKITTI \
+  --prob_lightstage=$P_LIGHTSTAGE \
   --mix_dataset \
   --random_flip \
   --align_cam_normal \
@@ -48,7 +52,8 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --seed=42 \
   --max_train_steps=20000 \
   --learning_rate=3e-05 \
-  --lr_scheduler="constant" --lr_warmup_steps=0 \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
   --task_name=$TASK_NAME \
   --timestep=$TIMESTEP \
   --validation_images=$VALIDATION_IMAGES \
@@ -58,4 +63,5 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
-  --use_lora
+  --use_lora \
+  --save_pred_vis
