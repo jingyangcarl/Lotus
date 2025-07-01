@@ -36,10 +36,10 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 import torch.nn as nn
 import transformers
-from accelerate import Accelerator
+from accelerate import Accelerator, PartialState
 from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
-from accelerate.utils import ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed, gather, gather_object
 from huggingface_hub import create_repo
 from packaging import version
 from tqdm.auto import tqdm
@@ -187,28 +187,41 @@ def run_rgb2x_example_validation(
     
     pred_annos = []
     input_images = []
-    
-    for i in tqdm(range(len(validation_images)), desc="Processing validation images"):
-        photo, preds, prompts = rgb2x(
-            validation_images[i], 
-            pipeline, 
-            accelerator,
-            generator,
-            inference_step, 
-            num_samples
-        )
 
-        assert len(preds) == len(prompts), "Number of images and prompts should be equal."
-        for i, (pred, prompt) in enumerate(zip(preds, prompts)):
-            pred_annos.append(pred[0])
-        
-        # tensor to PIL and convert to RGB
-        # photo = (photo * 0.5 + 0.5).clamp(0, 1)
-        photo = (photo * 255).to(torch.uint8)
-        photo = photo.permute(1, 2, 0).cpu().numpy()
-        photo = Image.fromarray(photo)
-        photo = photo.resize((pred[0].size), Image.LANCZOS)
-        input_images.append(photo)
+    # distributed inference
+    distributed_state = PartialState()
+    pipeline.to(distributed_state.device)
+    
+    with distributed_state.split_between_processes(validation_images) as validation_batch:
+        for i in tqdm(range(len(validation_batch)), desc=f"rgb2x quick_eval on {distributed_state.device}"):
+            photo, preds, prompts = rgb2x(
+                validation_batch[i], 
+                pipeline, 
+                accelerator,
+                generator,
+                inference_step, 
+                num_samples
+            )
+
+            assert len(preds) == len(prompts), "Number of images and prompts should be equal."
+            for j, (pred, prompt) in enumerate(zip(preds, prompts)):
+                pred_annos.append(pred[0])
+                        
+                normal_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
+                os.makedirs(os.path.dirname(normal_outpath), exist_ok=True)
+                pred[0].save(normal_outpath)
+            
+            # tensor to PIL and convert to RGB
+            # photo = (photo * 0.5 + 0.5).clamp(0, 1)
+            photo = (photo * 255).to(torch.uint8)
+            photo = photo.permute(1, 2, 0).cpu().numpy()
+            photo = Image.fromarray(photo)
+            photo = photo.resize((pred[0].size), Image.LANCZOS)
+            input_images.append(photo)
+
+    # gather distributed results
+    input_images = gather_object(input_images)
+    pred_annos = gather_object(pred_annos)
         
     # based on tasks, split the pred_annos lists based on the number of tasks
     # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
@@ -275,77 +288,92 @@ def run_lotus_example_validation(pipeline, task, args, step, accelerator, genera
     
     pred_annos = []
     input_images = []
+
+    # distributed inference
+    distributed_state = PartialState()
+    pipeline.to(distributed_state.device)
     
-    if task == "depth":
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
+    with distributed_state.split_between_processes(validation_images) as validation_batch:
+        for i in tqdm(range(len(validation_batch)), desc=f"lotus quick_eval on {distributed_state.device}"):
+            if task == "depth":
+                if torch.backends.mps.is_available():
+                    autocast_ctx = nullcontext()
+                else:
+                    autocast_ctx = torch.autocast(accelerator.device.type)
+
+                with autocast_ctx:
+                    validation_image = Image.open(validation_batch[i]).convert("RGB")
+                    input_images.append(validation_image)
+
+                    # Preprocess validation image
+                    validation_image = np.array(validation_image).astype(np.float32)
+                    validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
+                    validation_image = validation_image / 127.5 - 1.0 
+                    validation_image = validation_image.to(accelerator.device)
+
+                    task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
+                    task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+
+                    # Run
+                    pred_depth = pipeline(
+                        rgb_in=validation_image, 
+                        task_emb=task_emb,
+                        prompt="", 
+                        num_inference_steps=1, 
+                        timesteps=[args.timestep],
+                        generator=generator, 
+                        output_type='np',
+                        ).images[0]
+                    
+                    # Post-process the prediction
+                    pred_depth = pred_depth.mean(axis=-1)
+                    is_reverse_color = "disparity" in args.norm_type
+                    depth_color = colorize_depth_map(pred_depth, reverse_color=is_reverse_color)
+                    
+                    pred_annos.append(depth_color)
+
+            elif task == "normal":
+                # for i in range(len(validation_images)):
+                    if torch.backends.mps.is_available():
+                        autocast_ctx = nullcontext()
+                    else:
+                        autocast_ctx = torch.autocast(accelerator.device.type)
+
+                    with autocast_ctx:
+                        validation_image = Image.open(validation_batch[i]).convert("RGB")
+                        input_images.append(validation_image)
+
+                        # Preprocess validation image
+                        validation_image = np.array(validation_image).astype(np.float32)
+                        validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
+                        validation_image = validation_image / 127.5 - 1.0 
+                        validation_image = validation_image.to(accelerator.device)
+
+                        task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
+                        task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
+
+                        # Run
+                        pred_normal = pipeline(
+                            rgb_in=validation_image, 
+                            task_emb=task_emb,
+                            prompt="", 
+                            num_inference_steps=1, 
+                            timesteps=[args.timestep],
+                            generator=generator,
+                            ).images[0]
+                        
+                        normal_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}.jpg')
+                        os.makedirs(os.path.dirname(normal_outpath), exist_ok=True)
+                        pred_normal.save(normal_outpath)
+                        
+                        pred_annos.append(pred_normal)
+                        
             else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
+                raise ValueError(f"Not Supported Task: {args.task_name}!")
 
-            with autocast_ctx:
-                # Preprocess validation image
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
-                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
-                validation_image = validation_image / 127.5 - 1.0 
-                validation_image = validation_image.to(accelerator.device)
-
-                task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
-                task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
-
-                # Run
-                pred_depth = pipeline(
-                    rgb_in=validation_image, 
-                    task_emb=task_emb,
-                    prompt="", 
-                    num_inference_steps=1, 
-                    timesteps=[args.timestep],
-                    generator=generator, 
-                    output_type='np',
-                    ).images[0]
-                
-                # Post-process the prediction
-                pred_depth = pred_depth.mean(axis=-1)
-                is_reverse_color = "disparity" in args.norm_type
-                depth_color = colorize_depth_map(pred_depth, reverse_color=is_reverse_color)
-                
-                pred_annos.append(depth_color)
-
-    elif task == "normal":
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
-            else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
-
-            with autocast_ctx:
-                # Preprocess validation image
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
-                validation_image = torch.tensor(validation_image).permute(2,0,1).unsqueeze(0)
-                validation_image = validation_image / 127.5 - 1.0 
-                validation_image = validation_image.to(accelerator.device)
-
-                task_emb = torch.tensor([1, 0]).float().unsqueeze(0).repeat(1, 1).to(accelerator.device)
-                task_emb = torch.cat([torch.sin(task_emb), torch.cos(task_emb)], dim=-1).repeat(1, 1)
-
-                # Run
-                pred_normal = pipeline(
-                    rgb_in=validation_image, 
-                    task_emb=task_emb,
-                    prompt="", 
-                    num_inference_steps=1, 
-                    timesteps=[args.timestep],
-                    generator=generator,
-                    ).images[0]
-                
-                pred_annos.append(pred_normal)
-                
-    else:
-        raise ValueError(f"Not Supported Task: {args.task_name}!")
+    # gather distributed results
+    input_images = gather_object(input_images)
+    pred_annos = gather_object(pred_annos)
 
     # Save output
     save_output = concatenate_images(input_images, pred_annos)
@@ -360,30 +388,45 @@ def run_dsine_example_validation(normal_predictor, task, args, step, accelerator
     
     pred_annos = []
     input_images = []
+
+    # distributed inference
+    distributed_state = PartialState()
+    normal_predictor.model.to(distributed_state.device)
     
-    if task == "normal":
-        for i in range(len(validation_images)):
-            if torch.backends.mps.is_available():
-                autocast_ctx = nullcontext()
-            else:
-                autocast_ctx = torch.autocast(accelerator.device.type)
+    with distributed_state.split_between_processes(validation_images) as validation_batch:
+        # print(f"[DEBUG] Rank {PartialState().process_index} out of {PartialState().num_processes}")
+        # print(f"[RANK {distributed_state.process_index}] Received {len(validation_batch)} images out of {len(validation_images)} total")
+        if task == "normal":
+            for i in tqdm(range(len(validation_batch)), desc=f"dsine quick_eval on {distributed_state.device}"):
+                if torch.backends.mps.is_available():
+                    autocast_ctx = nullcontext()
+                else:
+                    autocast_ctx = torch.autocast(accelerator.device.type)
 
-            with autocast_ctx:
-                # photo = cv2.imread(validation_images[i], cv2.IMREAD_COLOR)
-                validation_image = Image.open(validation_images[i]).convert("RGB")
-                input_images.append(validation_image)
-                validation_image = np.array(validation_image).astype(np.float32)
+                with autocast_ctx:
+                    # photo = cv2.imread(validation_images[i], cv2.IMREAD_COLOR)
+                    # print(f"DEBUGGING Processing {validation_batch[i]}...")
+                    validation_image = Image.open(validation_batch[i]).convert("RGB")
+                    input_images.append(validation_image)
+                    validation_image = np.array(validation_image).astype(np.float32)
 
-                # Use the model to infer the normal map from the input image
-                with torch.inference_mode():
-                    normal = normal_predictor.infer_cv2(validation_image)[0] # Output shape: (3, H, W)
-                    normal = (normal + 1.) / 2.  # Convert values to the range [0, 1]
-                normal = (normal * 255).cpu().numpy().astype(np.uint8).transpose(1, 2, 0) # Output shape: (H, W, 3)
-                normal = Image.fromarray(normal)  # Convert to PIL Image
+                    # Use the model to infer the normal map from the input image
+                    with torch.inference_mode():
+                        normal = normal_predictor.infer_cv2(validation_image)[0] # Output shape: (3, H, W)
+                        normal = (normal + 1.) / 2.  # Convert values to the range [0, 1]
+                    normal = (normal * 255).cpu().numpy().astype(np.uint8).transpose(1, 2, 0) # Output shape: (H, W, 3)
+                    normal = Image.fromarray(normal)  # Convert to PIL Image
+                    normal_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}.jpg')
+                    os.makedirs(os.path.dirname(normal_outpath), exist_ok=True)
+                    normal.save(normal_outpath)
 
-                pred_annos.append(normal)
-    else:
-        raise ValueError(f"Not Supported Task: {args.task_name}!")
+                    pred_annos.append(normal)
+        else:
+            raise ValueError(f"Not Supported Task: {args.task_name}!")
+
+    # gather distributed results
+    input_images = gather_object(input_images)
+    pred_annos = gather_object(pred_annos)
 
     # Save output
     save_output = concatenate_images(input_images, pred_annos)
@@ -503,7 +546,7 @@ def run_evaluation(pipeline, task, args, step, accelerator):
         else:
                 raise ValueError(f"Not Supported Task: {task}!")
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=2):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=10):
     logger.info("Running validation for task: %s... " % args.task_name[0])
     task = args.task_name[0]
 
@@ -1413,7 +1456,8 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
     
-    if accelerator.is_main_process and args.validation_images is not None:
+    # if accelerator.is_main_process and args.validation_images is not None:
+    if args.validation_images is not None: # enable distributed validation
         log_validation(
             vae,
             text_encoder,
@@ -1655,17 +1699,22 @@ def main():
                                 safe_serialization=True,
                             )
                 
-                    if global_step % validation_steps == 0:
-                        log_validation(
-                            vae,
-                            text_encoder,
-                            tokenizer,
-                            unet,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
+                if global_step % validation_steps == 0:
+                    log_validation(
+                        vae,
+                        text_encoder,
+                        tokenizer,
+                        unet,
+                        args,
+                        accelerator,
+                        weight_dtype,
+                        global_step,
+                    )
+                    pass
+
+                    if accelerator.is_main_process:
+                        # collect all and save the validation images
+                        # TODO: here
                         pass
 
             if global_step >= args.max_train_steps:
