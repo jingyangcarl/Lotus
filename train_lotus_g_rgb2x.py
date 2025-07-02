@@ -1580,7 +1580,7 @@ def main():
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
                 if args.task_name[0] == "depth" and valid_mask_for_latent is not None:
-                    sky_mask_for_latent = batch.get("sky_mask_values", None)args.timestep
+                    sky_mask_for_latent = batch.get("sky_mask_values", None)
                     valid_mask_for_latent = valid_mask_for_latent + sky_mask_for_latent
                 if valid_mask_for_latent is not None:
                     valid_mask_for_latent = valid_mask_for_latent.bool()
