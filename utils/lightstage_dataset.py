@@ -61,7 +61,8 @@ class LightstageDataset(Dataset):
         self.windows = []
         
         print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
-        for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')):
+        # for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')): # annoying when multi gpu
+        for rowidx, row in enumerate(metadata):
             
             # general filter
             if row['l'] <= 1 or row['l'] >= 348:

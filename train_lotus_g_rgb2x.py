@@ -183,7 +183,6 @@ def run_rgb2x_example_validation(
     
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
-    print(validation_images)
     
     pred_annos = []
     input_images = []
@@ -284,7 +283,6 @@ def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps
 def run_lotus_example_validation(pipeline, task, args, step, accelerator, generator, model_alias='model'):
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
-    print(validation_images)
     
     pred_annos = []
     input_images = []
@@ -384,7 +382,6 @@ def run_lotus_example_validation(pipeline, task, args, step, accelerator, genera
 def run_dsine_example_validation(normal_predictor, task, args, step, accelerator, generator, model_alias='dsine'):
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
-    print(validation_images)
     
     pred_annos = []
     input_images = []
@@ -565,14 +562,24 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # unet.disable_adapters()
         # pass
 
-    def wrap_pipeline_lotus(pretrained_model_name_or_path, model_alias='model', reload_unet=False, disable_lora_on_reference=False):
+    def wrap_pipeline_lotus(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
 
-        if reload_unet:
+        if reload_pretrained_unet:
             # reloading unet to preserver the pretrained results
+            unet_save = unet
             unet = UNet2DConditionModel.from_pretrained(
                 pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
                 low_cpu_mem_usage=False, device_map=None,
-            )
+            ).to(accelerator.device, weight_dtype)
+        elif disable_lora_on_reference:
+            # when not reloading, check if need to disable lora adapters
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.disable_adapters() # multi-gpu
+            else:
+                unet.disable_adapters() # single gpu
+        else:
+            # use the finetuned unet
+            pass
 
         # Load pipeline
         scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
@@ -599,18 +606,39 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         run_lotus_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
     
         # Run evaluation
-        # run_evaluation(pipeline, task, args, step, accelerator)
-        run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+        if enable_eval:
+            run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
         
         del pipeline
 
-    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, model_alias='model', disable_lora_on_reference=False):
+        if reload_pretrained_unet:
+            unet = unet_save
+        elif disable_lora_on_reference:
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.enable_adapters()
+            else:
+                unet.enable_adapters()
+        else:
+            pass
 
-        if disable_lora_on_reference:
+    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
+
+        if reload_pretrained_unet:
+            # reloading unet to preserver the pretrained results
+            unet_save = unet
+            unet = UNet2DConditionModel.from_pretrained(
+                pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
+                low_cpu_mem_usage=False, device_map=None,
+            ).to(accelerator.device, weight_dtype)
+        elif disable_lora_on_reference:
+            # when not reloading, check if need to disable lora adapters
             if isinstance(unet, nn.parallel.DistributedDataParallel):
                 unet.module.disable_adapters() # multi-gpu
             else:
                 unet.disable_adapters() # single gpu
+        else:
+            # use the finetuned unet
+            pass
 
         pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
             pretrained_model_name_or_path,
@@ -635,35 +663,44 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # photo_path = '/home/jyang/projects/ObjectReal/external/lotus/datasets/quick_validation/00.png'
         run_rgb2x_example_validation(pipeline_rgb2x, task, args, step, accelerator, generator, model_alias=model_alias)
 
-        run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+        if enable_eval:
+            run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
         del pipeline_rgb2x
 
-        if disable_lora_on_reference:
+        if reload_pretrained_unet:
+            unet = unet_save
+        elif disable_lora_on_reference:
             if isinstance(unet, nn.parallel.DistributedDataParallel):
                 unet.module.enable_adapters()
             else:
                 unet.enable_adapters()
+        else:
+            pass
 
-    def wrap_pipeline_dsine(pretrained_model_name_or_path, model_alias='model'):
+    def wrap_pipeline_dsine(pretrained_model_name_or_path, model_alias='model', enable_eval=False):
         # https://github.com/baegwangbin/DSINE
 
         normal_predictor = torch.hub.load("hugoycj/DSINE-hub", "DSINE", trust_repo=True)
 
         run_dsine_example_validation(normal_predictor, task, args, step, accelerator, generator, model_alias=model_alias)
 
-        run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+        if enable_eval:
+            run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
-    
-    # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
+    enable_eval = False
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
-        wrap_pipeline_lotus(args.pretrained_model_name_or_path)
+        wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+        wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
     
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
-        wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine')
-        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_finetune_lora')
-        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, model_alias='rgb2x_original', disable_lora_on_reference=True) # default model output
-        wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', model_alias='lotus_original', reload_unet=True, disable_lora_on_reference=True) # default model output
+        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+
+    # generate pretrained results
+    wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
+    wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
         
     # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
@@ -1252,24 +1289,24 @@ def main():
 
     # -----------------Loading Datasets-----------------
     # automatically fallback to no mix_dataset when only one dataset has positive probability
-    probs = {
+    db_prob = {
         "hypersim": args.prob_hypersim,
         "vkitti": args.prob_vkitti,
         "lightstage": args.prob_lightstage,
     }
-    probs_sum = sum(probs.values())
+    probs_sum = sum(db_prob.values())
     if probs_sum <= 0:
         assert probs_sum <= 0, (
             "All dataset probabilities are set to 0. If you want to use only Hypersim dataset, please set `mix_dataset` to False."
         )
     else:
         # normalize the probabilities to sum up to 1
-        probs = {k: v / probs_sum for k, v in probs.items()}
+        db_prob = {k: v / probs_sum for k, v in db_prob.items()}
 
     # when use args.mix_dataset, check if at least two datasets have positive probability
     # if not, set args.mix_dataset to False
     if args.mix_dataset:
-        if sum(1 for v in probs.values() if v > 0) < 2:
+        if sum(1 for v in db_prob.values() if v > 0) < 2:
             logger.warning(
                 "Only one dataset has positive probability. Setting `mix_dataset` to False."
             )
@@ -1277,7 +1314,8 @@ def main():
 
     # Get the datasets and dataloaders.
     # -------------------- Dataset1: Hypersim --------------------
-    if probs["hypersim"] > 0:
+    if db_prob["hypersim"] > 0:
+        print("Loading hypersim dataset...")
         tik = time.time()
         train_hypersim_dataset, preprocess_train_hypersim, collate_fn_hypersim = get_hypersim_dataset_depth_normal(
             args.train_data_dir_hypersim, args.resolution_hypersim, args.random_flip, 
@@ -1303,7 +1341,8 @@ def main():
         train_dataloader_hypersim = torch.utils.data.DataLoader(train_dataset_hypersim)
         print("Skipping hypersim dataset as its probability is set to 0.")
     # -------------------- Dataset2: VKITTI --------------------
-    if probs["vkitti"] > 0:
+    if db_prob["vkitti"] > 0:
+        print("Loading vkitti dataset...")
         tik = time.time()
         transform_vkitti = VKITTITransform(random_flip=args.random_flip)
         train_dataset_vkitti = VKITTIDataset(args.train_data_dir_vkitti, transform_vkitti, args.norm_type, truncnorm_min=args.truncnorm_min)
@@ -1322,7 +1361,8 @@ def main():
         print("Skipping vkitti dataset as its probability is set to 0.")
     
     # -------------------- Dataset4: Lightstage --------------------
-    if probs["lightstage"] > 0:
+    if db_prob["lightstage"] > 0:
+        print("Loading lightstage dataset...")
         tik = time.time()
         train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name)
         train_dataloader_lightstage = torch.utils.data.DataLoader(
@@ -1338,11 +1378,18 @@ def main():
         train_dataset_lightstage = EmptyDataset()
         train_dataloader_lightstage = torch.utils.data.DataLoader(train_dataset_lightstage)
         print("Skipping lightstage dataset as its probability is set to 0.")
+
+    # dataset summary
+    db_num = {
+        "hypersim": len(train_dataset_hypersim),
+        "vkitti": len(train_dataset_vkitti),
+        "lightstage": len(train_dataset_lightstage),
+    }
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
-    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*probs['hypersim'] + len(train_dataloader_vkitti)*probs['vkitti'] + len(train_dataloader_lightstage)*probs['lightstage']) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*db_prob['hypersim'] + len(train_dataloader_vkitti)*db_prob['vkitti'] + len(train_dataloader_lightstage)*db_prob['lightstage']) / args.gradient_accumulation_steps)
     assert args.max_train_steps is not None or args.num_train_epochs is not None, "max_train_steps or num_train_epochs should be provided"
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -1376,7 +1423,7 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
-    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*probs['hypersim'] + len(train_dataloader_vkitti)*probs['vkitti'] + len(train_dataloader_lightstage)*probs['lightstage']) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*db_prob['hypersim'] + len(train_dataloader_vkitti)*db_prob['vkitti'] + len(train_dataloader_lightstage)*db_prob['lightstage']) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
@@ -1399,11 +1446,12 @@ def main():
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
-    logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
-    logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
+    # logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
+    # logger.info(f"  Num examples VKITTI = {len(train_dataset_vkitti)}")
+    # logger.info(f"  Num examples Lightstage = {len(train_dataset_lightstage)}")
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
-    logger.info(f"  Dataset probabilities: {probs}")
+    logger.info(f"  Dataset Num Examples = {db_num}")
+    logger.info(f"  Dataset probabilities: {db_prob}")
     # logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
     # logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
     # logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
@@ -1480,7 +1528,9 @@ def main():
         log_rgb_loss = 0.0
 
         # for _ in range(len(train_dataloader_hypersim)):
-        for _ in range(len(train_dataloader_lightstage)):
+        # for _ in range(len(train_dataloader_lightstage)):
+        data_samples = int(sum([db_num[k] * db_prob[k] for k in db_num.keys()])) # total number of samples in the mixed dataset
+        for _ in range(data_samples):
             if args.mix_dataset:
                 if random.random() < args.prob_hypersim:
                     batch = next(iter_hypersim)
@@ -1494,8 +1544,14 @@ def main():
                         iter_vkitti = iter(train_dataloader_vkitti)
                         batch = next(iter_vkitti)
             else:
-                # batch = next(iter_hypersim)
-                batch = next(iter_lightstage)
+                if args.prob_hypersim > 0:
+                    batch = next(iter_hypersim)
+                elif args.prob_vkitti > 0:
+                    batch = next(iter_vkitti)
+                elif args.prob_lightstage > 0:
+                    batch = next(iter_lightstage)
+                else:
+                    raise ValueError("No dataset has positive probability. Please check your dataset probabilities.")
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space
@@ -1517,12 +1573,14 @@ def main():
                 target_latents = target_latents * vae.config.scaling_factor
                 
                 bsz = target_latents.shape[0]
-                bsz_per_task = int(bsz/2)
+                num_tasks = 2
+                # bsz_per_task = int(bsz/2)
+                bsz_per_task = int(bsz/num_tasks)
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
                 if args.task_name[0] == "depth" and valid_mask_for_latent is not None:
-                    sky_mask_for_latent = batch.get("sky_mask_values", None)
+                    sky_mask_for_latent = batch.get("sky_mask_values", None)args.timestep
                     valid_mask_for_latent = valid_mask_for_latent + sky_mask_for_latent
                 if valid_mask_for_latent is not None:
                     valid_mask_for_latent = valid_mask_for_latent.bool()
@@ -1559,7 +1617,9 @@ def main():
                         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
                     
                     # Sample a random timestep for each image
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long()
+                    # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # TODO: batch timestep consistency
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz_per_task,), device=target_latents.device, generator=generator).long()
+                    timesteps = timesteps.repeat(num_tasks) # repeat for rgb and target latents
                     pass
                 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -1600,9 +1660,6 @@ def main():
                 encoder_hidden_states = text_encoder(text_input_ids, return_dict=False)[0]
                 encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
 
-                # Get the target for loss
-                target = target_latents
-
                 # Predict
                 # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
                 if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
@@ -1615,9 +1672,18 @@ def main():
 
                     # lotus used class_embed_type="projection" in the unet
                     model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False, class_labels=task_emb)[0]
+                
+                    # Get the target for loss
+                    # lotus use x0-prediction claimed in paper (https://arxiv.org/pdf/2409.18124)
+                    target = target_latents # x0 prediction in lotus
+
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # ValueError: class_labels should be provided when num_class_embeds > 0
                     model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # rgb2x uses prompt to control instead of class_labels
+
+                    # rgb2x use v-prediction claimed in paper (https://arxiv.org/pdf/2405.00666) Sec. 4. 
+                    # texnet/train_controlnet.py has v_prediction implementation
+                    target = noise_scheduler.get_velocity(target_latents, noise, timesteps)
 
                 # Compute loss
                 anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")

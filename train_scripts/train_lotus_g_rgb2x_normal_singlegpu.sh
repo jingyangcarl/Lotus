@@ -1,16 +1,33 @@
 # export PYTHONPATH="$(dirname "$(dirname "$0")"):$PYTHONPATH"
 
-# export MODEL_NAME="stabilityai/stable-diffusion-2-base"
-export MODEL_NAME="zheng95z/rgb-to-x"
+export MODEL_NAME="stabilityai/stable-diffusion-2-base"
+# export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
+# export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
-export TRAIN_DATA_DIR_HYPERSIM=/home/ICT2000/jyang/data/hypersim/for_lotus
-export TRAIN_DATA_DIR_VKITTI=/home/ICT2000/jyang/data/vkitti
+# Set environment variables based on machine name
+HOSTNAME=$(hostname)
+echo "Running on host: $HOSTNAME"
+case "$HOSTNAME" in
+  agamemnon-ub)
+    export TRAIN_DATA_DIR_HYPERSIM=/home/ICT2000/jyang/data/hypersim/for_lotus
+    export TRAIN_DATA_DIR_VKITTI=/home/ICT2000/jyang/data/vkitti
+    ;;
+  vgldgx01)
+    # export TRAIN_DATA_DIR_HYPERSIM=/labworking/Users/jyang/data/hypersim/for_lotus
+    export TRAIN_DATA_DIR_HYPERSIM=/home/jyang/data/hypersim/for_lotus
+    export TRAIN_DATA_DIR_VKITTI=/labworking/Users/jyang/data/vkitti
+    ;;
+  *)
+    echo "Unknown host: $HOSTNAME"
+    echo "Please update the script with correct paths for this machine."
+    ;;
+esac
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=0
+export P_HYPERSIM=1
 export P_VKITTI=0
-export P_LIGHTSTAGE=1
+export P_LIGHTSTAGE=0
 
 # training configs
 export BATCH_SIZE=4
@@ -29,7 +46,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-lotus-g-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lora_lightstage_debug"
+export OUTPUT_DIR="output/lora/train-sd2-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lora_hypersim_debug"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -56,6 +73,7 @@ accelerate launch --mixed_precision="fp16" \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
   --task_name=$TASK_NAME \
+  --timestep=$TIMESTEP \
   --validation_images=$VALIDATION_IMAGES \
   --validation_steps=$VAL_STEP \
   --checkpointing_steps=$VAL_STEP \
