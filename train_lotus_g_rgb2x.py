@@ -690,12 +690,18 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     enable_eval = False
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
-        wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-        wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
-    
+        if args.use_lora:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+        else:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
-        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-        wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+        if args.use_lora:
+            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+        else:
+            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     # generate pretrained results
     wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
@@ -1385,11 +1391,12 @@ def main():
         "vkitti": len(train_dataset_vkitti),
         "lightstage": len(train_dataset_lightstage),
     }
+    db_samples = int(sum([db_num[k] * db_prob[k] for k in db_num.keys()])) # total number of samples in the mixed dataset
     
     # Lr_scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
-    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*db_prob['hypersim'] + len(train_dataloader_vkitti)*db_prob['vkitti'] + len(train_dataloader_lightstage)*db_prob['lightstage']) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(db_samples / args.gradient_accumulation_steps)
     assert args.max_train_steps is not None or args.num_train_epochs is not None, "max_train_steps or num_train_epochs should be provided"
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -1423,11 +1430,11 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader_hypersim) / args.gradient_accumulation_steps)
-    num_update_steps_per_epoch = math.ceil((len(train_dataloader_hypersim)*db_prob['hypersim'] + len(train_dataloader_vkitti)*db_prob['vkitti'] + len(train_dataloader_lightstage)*db_prob['lightstage']) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(db_samples / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    # args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -1444,6 +1451,7 @@ def main():
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch) * total_batch_size
 
     logger.info("***** Running training *****")
     # logger.info(f"  Num examples Hypersim = {len(train_dataset_hypersim)}")
@@ -1464,6 +1472,11 @@ def main():
     logger.info(f"  Task name: {args.task_name}")
     logger.info(f"  Is Full Evaluation?: {args.FULL_EVALUATION}")
     logger.info(f"Output Workspace: {args.output_dir}")
+
+    assert (db_samples // args.train_batch_size ) * args.num_train_epochs >= args.max_train_steps, (
+        "The number of samples in the mixed dataset is too small for the given training batch size and number of epochs. "
+        "Please adjust the training batch size or the number of epochs."
+    )
 
     global_step = 0
     first_epoch = 0
@@ -1519,6 +1532,8 @@ def main():
         pass
             
     for epoch in range(first_epoch, args.num_train_epochs):
+        progress_bar.set_description(f"Epoch {epoch + 1}/{args.num_train_epochs}")
+
         iter_hypersim = iter(train_dataloader_hypersim)
         iter_vkitti = iter(train_dataloader_vkitti)
         iter_lightstage = iter(train_dataloader_lightstage)
@@ -1528,9 +1543,7 @@ def main():
         log_rgb_loss = 0.0
 
         # for _ in range(len(train_dataloader_hypersim)):
-        # for _ in range(len(train_dataloader_lightstage)):
-        data_samples = int(sum([db_num[k] * db_prob[k] for k in db_num.keys()])) # total number of samples in the mixed dataset
-        for _ in range(data_samples):
+        for _ in range(db_samples):
             if args.mix_dataset:
                 if random.random() < args.prob_hypersim:
                     batch = next(iter_hypersim)
@@ -1545,11 +1558,20 @@ def main():
                         batch = next(iter_vkitti)
             else:
                 if args.prob_hypersim > 0:
-                    batch = next(iter_hypersim)
+                    try:
+                        batch = next(iter_hypersim)
+                    except StopIteration:
+                        continue # next epoch
                 elif args.prob_vkitti > 0:
-                    batch = next(iter_vkitti)
+                    try:
+                        batch = next(iter_vkitti)
+                    except StopIteration:
+                        continue # next epoch
                 elif args.prob_lightstage > 0:
-                    batch = next(iter_lightstage)
+                    try:
+                        batch = next(iter_lightstage)
+                    except StopIteration:
+                        continue # next epoch
                 else:
                     raise ValueError("No dataset has positive probability. Please check your dataset probabilities.")
 

@@ -45,7 +45,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-lotus-g-${TASK_NAME}-bsz${TOTAL_BSZ}_multigpu_lora_hypersim_debug"
+export OUTPUT_DIR="output/lora/train-lotus-g-${TASK_NAME}-bsz${TOTAL_BSZ}_multigpu_lora_hypersim"
 
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -61,7 +61,7 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --mix_dataset \
   --random_flip \
   --align_cam_normal \
-  --dataloader_num_workers=0 \
+  --dataloader_num_workers=32 \
   --train_batch_size=$BATCH_SIZE \
   --gradient_accumulation_steps=$GAS \
   --gradient_checkpointing \
@@ -80,5 +80,4 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
-  --use_lora \
   --save_pred_vis

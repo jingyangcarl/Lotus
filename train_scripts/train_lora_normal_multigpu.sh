@@ -1,7 +1,7 @@
 # export PYTHONPATH="$(dirname "$(dirname "$0")"):$PYTHONPATH"
 
-export MODEL_NAME="stabilityai/stable-diffusion-2-base"
-# export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
+# export MODEL_NAME="stabilityai/stable-diffusion-2-base"
+export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
 # export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
@@ -34,7 +34,6 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=0
 
 # model configs
 export TIMESTEP=999
@@ -46,9 +45,9 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-sd2-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lora_hypersim_debug"
+export OUTPUT_DIR="output/lora/train-lotus-g-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_multigpu_hypersim"
 
-accelerate launch --mixed_precision="fp16" \
+accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
   --main_process_port="13226" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
@@ -62,7 +61,7 @@ accelerate launch --mixed_precision="fp16" \
   --mix_dataset \
   --random_flip \
   --align_cam_normal \
-  --dataloader_num_workers=0 \
+  --dataloader_num_workers=32 \
   --train_batch_size=$BATCH_SIZE \
   --gradient_accumulation_steps=$GAS \
   --gradient_checkpointing \
