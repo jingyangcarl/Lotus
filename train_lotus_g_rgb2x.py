@@ -704,9 +704,9 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     # generate pretrained results
-    wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
-    wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-    wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    # wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
+    # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    # wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
         
     # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
@@ -1184,6 +1184,14 @@ def main():
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
             low_cpu_mem_usage=False, device_map=None,
         )
+
+        pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+        )
+
+        noise_scheduler = DDIMScheduler.from_config(
+            pipeline_rgb2x.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+        )
         
     # Apply LoRA to all attention processors
     if args.use_lora:
@@ -1579,7 +1587,7 @@ def main():
                 # Convert images to latent space
                 rgb_latents = vae.encode(
                     torch.cat((batch["pixel_values"],batch["pixel_values"]), dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
+                    ).latent_dist.sample() # [2B, 4, h, w]
                 rgb_latents = rgb_latents * vae.config.scaling_factor
                 # Convert target_annotations to latent space
                 assert len(args.task_name) == 1
@@ -1591,13 +1599,21 @@ def main():
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 target_latents = vae.encode(
                     torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
-                    ).latent_dist.sample()
+                    ).latent_dist.sample() # [2B, 4, h, w]
                 target_latents = target_latents * vae.config.scaling_factor
+
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+                    bsz = target_latents.shape[0]
+                    num_tasks = 1
+                    bsz_per_task = int(bsz/(num_tasks+1))
+
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    rgb_latents = rgb_latents[:args.train_batch_size] # [B, 4, h, w]
+                    target_latents = target_latents[:args.train_batch_size] # [B, 4, h, w]
                 
-                bsz = target_latents.shape[0]
-                num_tasks = 2
-                # bsz_per_task = int(bsz/2)
-                bsz_per_task = int(bsz/num_tasks)
+                    bsz = target_latents.shape[0]
+                    num_tasks = 1
+                    bsz_per_task = int(bsz/num_tasks)
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
@@ -1615,7 +1631,7 @@ def main():
                 valid_mask_down_rgb = torch.ones_like(target_latents[bsz_per_task:]).to(target_latents.device).bool()
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(target_latents)
+                noise = torch.randn_like(target_latents) # [2B, 4, h, w]
                 
                 if args.noise_offset:
                     # https://www.crosslabs.org//blog/diffusion-with-offset-noise
@@ -1633,15 +1649,15 @@ def main():
                     timesteps = timesteps.long()
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # multiple timesteps
+                    # TODO: https://github.com/prs-eth/Marigold/blob/b1dffaaa3f7a2fe406b3bb9dd3c358b30da66060/src/trainer/marigold_normals_trainer.py#L235
                     if args.seed is None:
                         generator = None
                     else:
                         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
                     
                     # Sample a random timestep for each image
-                    # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # TODO: batch timestep consistency
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz_per_task,), device=target_latents.device, generator=generator).long()
-                    timesteps = timesteps.repeat(num_tasks) # repeat for rgb and target latents
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [2B,]
+                    # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device).long() # [2B,]
                     pass
                 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -1649,12 +1665,17 @@ def main():
                 if args.input_perturbation:
                     noisy_latents = noise_scheduler.add_noise(target_latents, new_noise, timesteps)
                 else:
-                    noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
+                    noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps) # [2B, 4, h, w]
 
                 # Concatenate rgb and depth
-                unet_input = torch.cat(
-                    [rgb_latents, noisy_latents], dim=1
-                )
+                if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+                    unet_input = torch.cat(
+                        [rgb_latents, noisy_latents], dim=1
+                    ) # [2B, 8, h, w]
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    unet_input = torch.cat(
+                        [noisy_latents, rgb_latents], dim=1
+                    ) # [2B, 8, h, w]
 
                 # Get the empty text embedding for conditioning
                 # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
@@ -1668,7 +1689,8 @@ def main():
                         return_tensors="pt",
                     )
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
-                    prompt = "Camera-space Normal"
+                    # prompt = "Albedo (diffuse basecolor)"
+                    prompt = "Camera-space Normal" # checked, this is correct during the training
                     # prompt = ""
                     # from StableDiffusionAOVMatEstPipeline::_encode_prompt
                     text_inputs = tokenizer(
@@ -1693,25 +1715,34 @@ def main():
                     task_emb = torch.cat((task_emb_anno, task_emb_rgb), dim=0)
 
                     # lotus used class_embed_type="projection" in the unet
-                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False, class_labels=task_emb)[0]
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False, class_labels=task_emb)[0] # [bsz, 8, h, w]
                 
                     # Get the target for loss
                     # lotus use x0-prediction claimed in paper (https://arxiv.org/pdf/2409.18124)
                     target = target_latents # x0 prediction in lotus
 
+                    # Compute loss
+                    anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
+                    rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
+                    loss = anno_loss + rgb_loss
+
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # ValueError: class_labels should be provided when num_class_embeds > 0
-                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # rgb2x uses prompt to control instead of class_labels
-
+                    # rgb2x uses prompt to control instead of class_labels
+                    # makesure unet_input uses the correct component,
+                    # model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [2B, 4, h, w]
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [B, 4, h, w]
+                    
                     # rgb2x use v-prediction claimed in paper (https://arxiv.org/pdf/2405.00666) Sec. 4. 
                     # texnet/train_controlnet.py has v_prediction implementation
+                    # reference: https://github.com/prs-eth/Marigold/blob/main/src/trainer/marigold_normals_trainer.py
+                    assert noise_scheduler.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
                     target = noise_scheduler.get_velocity(target_latents, noise, timesteps)
 
-                # Compute loss
-                anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
-                rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
-                # rgb_loss *= 0.
-                loss = anno_loss + rgb_loss
+                    # Compute loss
+                    anno_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    rgb_loss = 0*anno_loss # no rgb loss in rgb2x
+                    loss = anno_loss + rgb_loss
 
                 # Gather loss
                 avg_anno_loss = accelerator.gather(anno_loss.repeat(args.train_batch_size)).mean()
