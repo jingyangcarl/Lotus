@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 import random
 from torchvision import transforms
+from tqdm import tqdm
 
 def hypersim_distance_to_depth(npyDistance):
     intWidth=1024
@@ -142,6 +143,11 @@ def get_hypersim_dataset_depth_normal(data_dir, resolution, random_flip, norm_ty
         "normal": []
     }
     for root, dirs, files in os.walk(split_dir):
+            
+        # quick stop to validate the code first
+        # if len(data_dict["image"]) > 10:
+            # break
+        
         for file in files:
             if file.endswith("tonemap.jpg"): 
                 image_path = os.path.join(root, file)

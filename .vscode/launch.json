@@ -128,19 +128,21 @@
             },
             "args": [
                 // "--pretrained_model_name_or_path=stabilityai/stable-diffusion-2-base",
+                // "--pretrained_model_name_or_path=jingheya/lotus-normal-g-v1-1",
                 "--pretrained_model_name_or_path=zheng95z/rgb-to-x",
-                "--train_data_dir_hypersim=/labworking/Users/jyang/data/hypersim/for_lotus",
+                // "--train_data_dir_hypersim=/labworking/Users/jyang/data/hypersim/for_lotus",
+                "--train_data_dir_hypersim=/home/jyang/data/hypersim/for_lotus",
                 "--resolution_hypersim=576",
                 "--train_data_dir_vkitti=/labworking/Users_A-L/jyang/data/lotus/vkitti",
                 "--resolution_vkitti=375",
-                "--prob_hypersim=0.",
+                "--prob_hypersim=1.",
                 "--prob_vkitti=0.",
-                "--prob_lightstage=1.",
+                "--prob_lightstage=0.",
                 "--mix_dataset",
                 "--random_flip",
                 "--norm_type=trunc_disparity",
                 "--align_cam_normal",
-                "--dataloader_num_workers=0",
+                "--dataloader_num_workers=4",
                 "--train_batch_size=4",
                 "--gradient_accumulation_steps=1",
                 "--gradient_checkpointing",
@@ -155,16 +157,17 @@
                 // "--pipeline_name=LotusGPipeline",
                 // "--pipeline_name=LotusGMultistepsPipeline", // timestep will not work
                 "--validation_images=datasets/quick_validation/",
-                "--validation_steps=3",
-                "--checkpointing_steps=3",
+                "--validation_steps=50",
+                "--checkpointing_steps=500",
                 "--base_test_data_dir=datasets/eval/",
-                "--output_dir=output/debug/train-rgb2x-lora/",
+                // "--output_dir=output/debug/train-lotus-lora/",
+                "--output_dir=output/debug/train-rgb2x/",
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest",
-                "--use_lora",
+                // "--use_lora",
                 "--save_pred_vis"
             ],
-            "justMyCode": true
+            "justMyCode": false
         },
     ]
 }

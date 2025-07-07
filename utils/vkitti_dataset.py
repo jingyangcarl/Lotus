@@ -94,6 +94,11 @@ class VKITTIDataset(Dataset):
         self.normal_path=[]
         
         for scene in self.scenes:
+            
+            # quick stop to validate the code first
+            # if len(self.image_path) > 10:
+                # break
+        
             for cond in self.conditions:
                 for cam in self.cameras:
                     image_dir = os.path.join(self.root_dir, f'Scene{scene}/{cond}/frames/rgb/Camera_{cam}')

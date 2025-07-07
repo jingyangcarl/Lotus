@@ -1,8 +1,8 @@
 # export PYTHONPATH="$(dirname "$(dirname "$0")"):$PYTHONPATH"
 
-export MODEL_NAME="stabilityai/stable-diffusion-2-base"
+# export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 # export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-# export MODEL_NAME="zheng95z/rgb-to-x"
+export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
 # Set environment variables based on machine name
@@ -25,9 +25,9 @@ case "$HOSTNAME" in
 esac
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=1
+export P_HYPERSIM=0
 export P_VKITTI=0
-export P_LIGHTSTAGE=0
+export P_LIGHTSTAGE=1
 
 # training configs
 export BATCH_SIZE=4
@@ -46,7 +46,7 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 
 # output dir
-export OUTPUT_DIR="output/lora/train-sd2-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_hypersim"
+export OUTPUT_DIR="output/lora/train-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

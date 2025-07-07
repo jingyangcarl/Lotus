@@ -704,9 +704,9 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     # generate pretrained results
-    # wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
-    # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-    # wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
+    wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
         
     # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
@@ -1523,6 +1523,7 @@ def main():
         desc="Steps",
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
+        dynamic_ncols=True,
     )
     
     # if accelerator.is_main_process and args.validation_images is not None:
@@ -1597,6 +1598,14 @@ def main():
                     TAR_ANNO = "normal_values"
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                
+                if 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    # negate the x channel to adapt to the pretrained weights
+                    # the adjusted normals aligns to the lotus normal space
+                    batch[TAR_ANNO][:, 0, :, :] *= -1 # [B, 3, h, w]
+                else:
+                    pass
+                
                 target_latents = vae.encode(
                     torch.cat((batch[TAR_ANNO],batch["pixel_values"]), dim=0).to(weight_dtype)
                     ).latent_dist.sample() # [2B, 4, h, w]
