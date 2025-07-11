@@ -664,6 +664,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         run_rgb2x_example_validation(pipeline_rgb2x, task, args, step, accelerator, generator, model_alias=model_alias)
 
         if enable_eval:
+            # Note that, the results may different from the example_validation when evaluation loads exr images.
             run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
         del pipeline_rgb2x
@@ -698,10 +699,10 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
         if args.use_lora:
-            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
         else:
-            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
 
     # generate pretrained results
     wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
@@ -1617,12 +1618,13 @@ def main():
                     bsz_per_task = int(bsz/(num_tasks+1))
 
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
-                    rgb_latents = rgb_latents[:args.train_batch_size] # [B, 4, h, w]
-                    target_latents = target_latents[:args.train_batch_size] # [B, 4, h, w]
-                
                     bsz = target_latents.shape[0]
                     num_tasks = 1
-                    bsz_per_task = int(bsz/num_tasks)
+                    bsz_per_task = int(bsz/(num_tasks+1))
+                    
+                    rgb_latents = rgb_latents[:bsz_per_task] # [B, 4, h, w], use bsz_per_task here, since the batch sample can be smaller than args.train_batch_size
+                    target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
+                    bsz = rgb_latents.shape[0] # update bsz to the real batch size
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
@@ -1749,7 +1751,7 @@ def main():
                     target = noise_scheduler.get_velocity(target_latents, noise, timesteps)
 
                     # Compute loss
-                    anno_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    anno_loss = F.mse_loss(model_pred[valid_mask_down_anno].float(), target[valid_mask_down_anno].float(), reduction="mean")
                     rgb_loss = 0*anno_loss # no rgb loss in rgb2x
                     loss = anno_loss + rgb_loss
 

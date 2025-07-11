@@ -465,8 +465,7 @@ def evaluation_material(
                     elif 'dsine' in model_alias:
                         # Use the model to infer the normal map from the input image
                         with torch.inference_mode():
-                            normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W)
-                            normal = (normal + 1.) / 2.  # Convert values to the range [0, 1]
+                            normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W), [-1,1]
                         norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
 
                     # resize to original res
@@ -480,11 +479,13 @@ def evaluation_material(
                 pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
                 #↑↑↑↑
 
-                if 'normal_value' in data_dict.keys():
-                    gt_norm = data_dict['normal_value'].to(distributed_state.device)
-                    # gt_norm_mask = data_dict['normal_mask'].to(device)
+                if 'normal_w2c_value' in data_dict.keys():
+                    gt_norm = data_dict['normal_w2c_value'].to(distributed_state.device)
                     gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
 
+                    gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                    gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                    
                     pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
                     if total_normal_errors is None:
                         total_normal_errors = pred_error[gt_norm_mask]
@@ -494,10 +495,11 @@ def evaluation_material(
                         # total_normal_errors = torch.cat((total_normal_errors, pred_error), dim=0)
 
                 if results_dir is not None:
-                    # prefixs = ['%s_%s_%s_%s' % (o,l,i,j) for (o,l,i,j) in zip(img_meta['obj'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                    prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                    vis_utils.visualize_normal(results_dir, prefixs, img, pred_norm, pred_kappa,
-                                            gt_norm, gt_norm_mask, pred_error)
+                    if 'i' in img_meta:
+                        prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                    else:
+                        prefixs = [f'{o}_cam{c}_l{l}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
+                    vis_utils.visualize_normal(results_dir, prefixs, img, pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
 
         metrics = None
         if total_normal_errors is not None:

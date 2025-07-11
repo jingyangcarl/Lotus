@@ -33,9 +33,12 @@ def pad_input(img, intrins, lrtb=(0,0,0,0)):
     """
     l, r, t, b = lrtb
     if l+r+t+b != 0:
-        pad_value_R = (0 - 0.485) / 0.229
-        pad_value_G = (0 - 0.456) / 0.224
-        pad_value_B = (0 - 0.406) / 0.225
+        # pad_value_R = (0 - 0.485) / 0.229
+        # pad_value_G = (0 - 0.456) / 0.224
+        # pad_value_B = (0 - 0.406) / 0.225
+        pad_value_R = 0
+        pad_value_G = 0
+        pad_value_B = 0
 
         img_R = F.pad(img[:,0:1,:,:], (l, r, t, b), mode="constant", value=pad_value_R)
         img_G = F.pad(img[:,1:2,:,:], (l, r, t, b), mode="constant", value=pad_value_G)
