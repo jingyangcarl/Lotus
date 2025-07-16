@@ -383,7 +383,7 @@ def evaluation_material(
         gen_prediction=None, pipeline=None, accelerator=None, generator=None, 
         prediction_dir=None, processing_res=None,
         eval_datasets=[('lightstage', 'test')],
-        save_pred_vis=False, eval_first_n=None, task='', model_alias='model'
+        save_pred_vis=False, args=None, task='', model_alias='model'
     ):
     '''
     if eval_mode == "load_prediction": assert prediction_dir is not None
@@ -406,7 +406,7 @@ def evaluation_material(
 
         if dataset_name == 'lightstage':
             from utils.lightstage_dataset import LightstageDataset
-            samples = LightstageDataset(split=split, tasks=task, eval_first_n=eval_first_n)
+            samples = LightstageDataset(split=split, tasks=task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
         # print(f'Number of samples in {dataset_name} {split}: {len(samples)}')
         test_loader = DataLoader(samples, 1, shuffle=False, num_workers=1, pin_memory=True)
         test_loader = accelerator.prepare(test_loader)
@@ -432,9 +432,9 @@ def evaluation_material(
                 intrins = None
 
                 # pad input
-                _, _, orig_H, orig_W = img.shape
-                lrtb = normal_utils.get_padding(orig_H, orig_W)
-                img, intrins = normal_utils.pad_input(img, intrins, lrtb)
+                # _, _, orig_H, orig_W = img.shape
+                # lrtb = normal_utils.get_padding(orig_H, orig_W)
+                # img, intrins = normal_utils.pad_input(img, intrins, lrtb)
 
                 # forward pass
                 # pred_list = model(img, intrins=intrins, mode='test')
@@ -448,12 +448,12 @@ def evaluation_material(
 
                 elif eval_mode == "generate_prediction":
                     # resize to processing_res
-                    if processing_res is not None:
-                        input_size = img.shape
-                        img =  resize_max_res(
-                        img, max_edge_resolution=processing_res,
-                        # resample_method=resample_method,
-                        )
+                    # if processing_res is not None:
+                    #     input_size = img.shape
+                    #     img =  resize_max_res(
+                    #     img, max_edge_resolution=processing_res,
+                    #     # resample_method=resample_method,
+                    #     )
                     # norm_out = gen_prediction(img, pipeline) # [1, 3, h, w]
                     if 'rgb2x' in model_alias:
                         img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
@@ -469,11 +469,11 @@ def evaluation_material(
                         norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
 
                     # resize to original res
-                    if processing_res is not None:
-                        norm_out = resize(norm_out, input_size[-2:], antialias=True, )
+                    # if processing_res is not None:
+                    #     norm_out = resize(norm_out, input_size[-2:], antialias=True, )
 
                 # crop the padded part
-                norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
+                # norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
 
                 pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
                 pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
@@ -483,8 +483,8 @@ def evaluation_material(
                     gt_norm = data_dict['normal_w2c_value'].to(distributed_state.device)
                     gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
 
-                    gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
-                    gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                    # gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                    # gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
                     
                     pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
                     if total_normal_errors is None:

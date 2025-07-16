@@ -25,9 +25,9 @@ case "$HOSTNAME" in
 esac
 export RES_HYPERSIM=576
 export RES_VKITTI=375
-export P_HYPERSIM=1
+export P_HYPERSIM=0
 export P_VKITTI=0
-export P_LIGHTSTAGE=0
+export P_LIGHTSTAGE=1
 
 # training configs
 export BATCH_SIZE=4
@@ -40,13 +40,19 @@ export CUDA_VISIBLE_DEVICES=6
 export TIMESTEP=999
 export TASK_NAME="normal"
 
+# data augmentatoin
+export AUG_RATIO="1:0"
+export AUG_TYPE="random8"
+
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
+export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
+export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/lora/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage"
+export OUTPUT_DIR="output/aug_eval/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-0-random8"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -59,6 +65,8 @@ accelerate launch --mixed_precision="fp16" \
   --prob_hypersim=$P_HYPERSIM \
   --prob_vkitti=$P_VKITTI \
   --prob_lightstage=$P_LIGHTSTAGE \
+  --lightstage_lighting_augmentation=$AUG_TYPE \
+  --lightstage_original_augmentation_ratio=$AUG_RATIO \
   --mix_dataset \
   --random_flip \
   --align_cam_normal \
@@ -68,14 +76,16 @@ accelerate launch --mixed_precision="fp16" \
   --gradient_checkpointing \
   --max_grad_norm=1 \
   --seed=42 \
-  --max_train_steps=20000 \
+  --max_train_steps=40000 \
   --learning_rate=3e-05 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
   --task_name=$TASK_NAME \
   --timestep=$TIMESTEP \
   --validation_images=$VALIDATION_IMAGES \
+  --evaluation_top_k=$EVAL_TOP_K \
   --validation_steps=$VAL_STEP \
+  --evaluation_steps=$EVAL_STEP \
   --checkpointing_steps=$VAL_STEP \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \

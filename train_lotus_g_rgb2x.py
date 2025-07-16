@@ -234,7 +234,7 @@ def run_rgb2x_example_validation(
 
 def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=10, model_alias=''):
 
-    if step >= 0:
+    if step >= 0 and step % args.evaluation_steps == 0:
         test_data_dir = os.path.join(args.base_test_data_dir, task)
         dataset_split_path = "evaluation/dataset_brdf"
         eval_datasets = [('lightstage', 'test')]
@@ -250,7 +250,7 @@ def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval
         eval_metrics = evaluation_material(eval_dir, test_data_dir, dataset_split_path, eval_mode="generate_prediction", 
                                                 gen_prediction=gen_prediction, pipeline=pipeline, accelerator=accelerator, generator=generator, 
                                                 eval_datasets=eval_datasets,
-                                                save_pred_vis=args.save_pred_vis, eval_first_n=eval_first_n, task=task, model_alias=model_alias)
+                                                save_pred_vis=args.save_pred_vis, args=args, task=task, model_alias=model_alias)
         
     
 def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps=1):
@@ -689,25 +689,28 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if enable_eval:
             run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
-    enable_eval = False
+    enable_eval = True
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
         if args.use_lora:
             wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+            # wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
         else:
             wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
         if args.use_lora:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
-            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
+            # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
         else:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
 
     # generate pretrained results
-    wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
-    wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-    wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    if step == 0:
+        wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
+        wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+        wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+    else:
+        pass
         
     # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
@@ -831,6 +834,18 @@ def parse_args():
         default=0.0,
     )
     parser.add_argument(
+        "--lightstage_lighting_augmentation",
+        type=str,
+        default="random8",
+        choices=["random8", "hdri", "none"],
+    )
+    parser.add_argument(
+        "--lightstage_original_augmentation_ratio",
+        type=str,
+        default="1:1",
+        choices=["1:1", "1:0", "0:1"],
+    )
+    parser.add_argument(
         "--mix_dataset",
         action="store_true",
         help='Whether to mix the training data from hypersim and vkitti'
@@ -876,6 +891,16 @@ def parse_args():
         type=int,
         default=500,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--evaluation_steps",
+        type=int,
+        default=5000,
+    )
+    parser.add_argument(
+        "--evaluation_top_k",
+        type=int,
+        default=10,
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
@@ -1379,7 +1404,7 @@ def main():
     if db_prob["lightstage"] > 0:
         print("Loading lightstage dataset...")
         tik = time.time()
-        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name)
+        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation)
         train_dataloader_lightstage = torch.utils.data.DataLoader(
             train_dataset_lightstage,
             shuffle=True,
@@ -1469,6 +1494,7 @@ def main():
     logger.info(f"  Using mix datasets: {args.mix_dataset}")
     logger.info(f"  Dataset Num Examples = {db_num}")
     logger.info(f"  Dataset probabilities: {db_prob}")
+    logger.info(f"  Dataset augmentation: {args.lightstage_lighting_augmentation}, {args.lightstage_original_augmentation_ratio}")
     # logger.info(f"  Dataset alternation probability of Hypersim = {args.prob_hypersim}")
     # logger.info(f"  Dataset alternation probability of VKITTI = {args.prob_vkitti}")
     # logger.info(f"  Dataset alternation probability of Lightstage = {args.prob_lightstage}")
@@ -1538,6 +1564,7 @@ def main():
             accelerator,
             weight_dtype,
             global_step,
+            eval_first_n=args.evaluation_top_k,
         )
         pass
             
@@ -1839,6 +1866,7 @@ def main():
                         accelerator,
                         weight_dtype,
                         global_step,
+                        eval_first_n=args.evaluation_top_k,
                     )
                     pass
 

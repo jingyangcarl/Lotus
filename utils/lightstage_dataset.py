@@ -16,7 +16,7 @@ class LightstageTransform:
 
 class LightstageDataset(Dataset):
 
-    def __init__(self, split='train', tasks='', eval_first_n=None):
+    def __init__(self, split='train', tasks='', ori_aug_ratio='1:1', lighting_aug='random8', eval_first_n=None):
 
         assert split in ['train', 'test'], f'Invalid split: {split}'
         
@@ -25,14 +25,21 @@ class LightstageDataset(Dataset):
         # metadata_path = f'./data/matnet/train/matnet_olat_{v}_debug.json'
         
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
-        self.root_dir = '/home/jyang/data/LightStageObjectDB_test' # local cache, no IO bottle neck
+        self.root_dir = '/home/jyang/data/LightStageObjectDB' # local cache, no IO bottle neck
         img_ext = 'exr' # 'exr' or 'jpg' # TODO: jpg need to updated to compatible with negative values, running now
         # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.csv'
         meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_fitting_512_ck.csv'
+        # The code `self.dataset_dir` is accessing the `dataset_dir` attribute of the current object
+        # (instance) in Python. This code is typically found within a class definition where `self`
+        # refers to the current instance of the class. By accessing `self.dataset_dir`, the code is
+        # retrieving the value stored in the `dataset_dir` attribute of the current object.
         self.dataset_dir = f'{self.root_dir}/datasets/{img_ext}/{v}/{v}_2'
         self.cam_dir = f'{self.root_dir}/Redline/exr/{v}/{v}_2/cameras'
+        
+        self.original_augmentation_ratio = ori_aug_ratio
+        self.lighting_augmentation = lighting_aug
         
         # load json file
         metadata = []
@@ -41,18 +48,60 @@ class LightstageDataset(Dataset):
                 metadata = json.load(f)
             elif '.csv' in meta_data_path:
                 metadata = pd.read_csv(f).to_dict(orient='records')
+                
+        # add a manual expansion here since the cropping's under processing
+        if 'fitting' in meta_data_path:
+            metadata_ = []
+            expansion_counter = 0
+            for row in tqdm(metadata, 'expanding metadata'):
+                cross_dir_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross')
+                paral_dir_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel')
+                
+                n_cross = len(os.listdir(cross_dir_path)) if os.path.isdir(cross_dir_path) else 0
+                n_paral = len(os.listdir(paral_dir_path)) if os.path.isdir(paral_dir_path) else 0
+                
+                if n_cross == 350 and n_paral == 350:
+                    for l in range(350):
+                        row['l'] = l
+                        
+                        if self.original_augmentation_ratio == '1:1':
+                            row_ = row.copy()
+                            row_['aug'] = True
+                            metadata_.append(row_)
+                            row_ = row.copy()
+                            row_['aug'] = False
+                            metadata_.append(row_)
+                        elif self.original_augmentation_ratio == '1:0':
+                            row_ = row.copy()
+                            row_['aug'] = False
+                            metadata_.append(row_)
+                        elif self.original_augmentation_ratio == '0:1':
+                            row_ = row.copy()
+                            row_['aug'] = True
+                            metadata_.append(row_)
+                        else:
+                            raise NotImplementedError(f'Original augmentation ratio {ori_aug_ratio} is not supported')
+                        
+                    expansion_counter += 1
+                else:
+                    metadata_.append(row)
+            print(f'Expanded metadata from {len(metadata)} to {len(metadata_)} by adding lighting index, {expansion_counter} objects expanded.')
+            metadata = metadata_
         
         self.omega_i_world = self.get_olat()
         # self.bbox_setting = self.init_bbox()
         
         self.texts = []
         self.objs = []
+        self.augmented = []
         self.camera_paths = []
         self.static_paths = []
         self.static_cross_paths = []
         self.static_parallel_paths = []
         self.cross_paths = []
         self.parallel_paths = []
+        self.cross_rgb_weights = [] # used to store the cross olat weights
+        self.parallel_rgb_weights = [] # used to store the cross olat weights
         self.albedo_paths = []
         self.normal_paths = []
         self.specular_paths = []
@@ -62,14 +111,15 @@ class LightstageDataset(Dataset):
         self.windows = []
         
         print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
-        # for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')): # annoying when multi gpu
-        for rowidx, row in enumerate(metadata):
+        for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')): # annoying when multi gpu
+        # for rowidx, row in enumerate(metadata):
+        
+            if row['l'] <= 1 or row['l'] >= 348:
+                # 2+346+2, 3,695,650 samples
+                continue
             
             # general filter
             if 'fitting' not in meta_data_path:
-                if row['l'] <= 1 or row['l'] >= 348:
-                    # 2+346+2, 3,695,650 samples
-                    continue
 
                 # task specific filter
                 task = tasks[0] if len(tasks) == 1 else tasks
@@ -99,6 +149,7 @@ class LightstageDataset(Dataset):
             
             self.texts.append(row)
             self.objs.append(row["obj"])
+            self.augmented.append(row['aug'])
             
             camera_path = os.path.join(self.cam_dir, f'camera{row["cam"]:02d}.txt')
             
@@ -117,15 +168,34 @@ class LightstageDataset(Dataset):
                 static_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static.{img_ext}')
                 static_cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_cross.{img_ext}')
                 static_parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_parallel.{img_ext}')
-                # cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["l"]:06d}.{img_ext}')
-                # parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["l"]:06d}.{img_ext}')
-                cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_cross.{img_ext}') # hack
-                parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_parallel.{img_ext}') # hack
+                cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["l"]:06d}.{img_ext}')
+                parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["l"]:06d}.{img_ext}')
+                # cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_cross.{img_ext}') # hack
+                # parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_parallel.{img_ext}') # hack
                 albedo_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'albedo.{img_ext}')
                 normal_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'normal.{img_ext}')
                 specular_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'specular.{img_ext}')
                 sigma_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'sigma.{img_ext}')
                 mask_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'mask.png')
+                
+            # change the cross_path and parallel_path to list of paths that consists of various lighting
+            # lighting_augmentation = 'random8' # 'single', 'random2', 'random4', 'hdri'
+            if self.lighting_augmentation == 'single':
+                cross_path = [cross_path]
+                parallel_path = [parallel_path]
+                cross_rgb_weights = [(1.0, 1.0, 1.0)]
+                parallel_rgb_weights = [(1.0, 1.0, 1.0)]
+            elif self.lighting_augmentation == 'random8':
+                random_lights = np.random.choice(self.omega_i_world.shape[0], 8, replace=False)
+                random_lights = [int(x) + 2 for x in random_lights]
+                cross_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
+                parallel_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
+                cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
+                parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
+            elif self.lighting_augmentation == 'hdri':
+                pass
+            assert type(cross_path) == list, f'cross_path should be a list, got {type(cross_path)}'
+            assert type(parallel_path) == list, f'parallel_path should be a list, got {type(parallel_path)}'
                 
             # check if the paths are valid, 42k examples took 2min, remove from this and add a preprocess check
             # this only need to be enabled once, disable later to save time
@@ -146,6 +216,8 @@ class LightstageDataset(Dataset):
             self.static_parallel_paths.append(static_parallel_path)
             self.cross_paths.append(cross_path)
             self.parallel_paths.append(parallel_path)
+            self.cross_rgb_weights.append(cross_rgb_weights)
+            self.parallel_rgb_weights.append(parallel_rgb_weights)
             self.albedo_paths.append(albedo_path)
             self.normal_paths.append(normal_path)
             self.specular_paths.append(specular_path)
@@ -320,10 +392,13 @@ class LightstageDataset(Dataset):
         # Load data
         text = self.texts[idx]
         obj = self.objs[idx]
+        augmented = self.augmented[idx]
         camera_path = self.camera_paths[idx]
         static_path = self.static_paths[idx]
         cross_path = self.cross_paths[idx]
         parallel_path = self.parallel_paths[idx]
+        cross_rgb_weights = self.cross_rgb_weights[idx]
+        parallel_rgb_weights = self.parallel_rgb_weights[idx]
         albedo_path = self.albedo_paths[idx]
         normal_path = self.normal_paths[idx]
         specular_path = self.specular_paths[idx]
@@ -333,11 +408,14 @@ class LightstageDataset(Dataset):
         # check
         example['text'] = self.texts[idx]
         example['obj_name'] = self.objs[idx]
+        example['augmented'] = self.augmented[idx]
         example['obj_material'] = ''
         example['camera_path'] = self.camera_paths[idx]
         example['static_path'] = self.static_paths[idx]
         example['cross_path'] = self.cross_paths[idx]
         example['parallel_path'] = self.parallel_paths[idx]
+        example['cross_rgb_weights'] = self.cross_rgb_weights[idx]
+        example['parallel_rgb_weights'] = self.parallel_rgb_weights[idx]
         example['albedo_path'] = self.albedo_paths[idx]
         example['normal_path'] = self.normal_paths[idx]
         example['specular_path'] = self.specular_paths[idx]
@@ -362,18 +440,22 @@ class LightstageDataset(Dataset):
             
         # load image data
         static = imageio.imread(static_path)
-        cross = imageio.imread(cross_path)
-        parallel = imageio.imread(parallel_path)
+        # cross = imageio.imread(cross_path)
+        # parallel = imageio.imread(parallel_path)
         albedo = imageio.imread(albedo_path)
         normal = imageio.imread(normal_path)
         specular = imageio.imread(specular_path)
         sigma = imageio.imread(sigma_path)
         mask = imageio.imread(mask_path) if mask_path else (np.ones_like(static[:,:,0], dtype=np.int8) * 255) # mask is optional, use ones if not exist
+        crosses = [imageio.imread(cross_path_) for cross_path_ in self.cross_paths[idx]]
+        parallels = [imageio.imread(parallel_path_) for parallel_path_ in self.parallel_paths[idx]]
+        cross = np.einsum('nhwc,nc->hwc', np.stack(crosses, axis=0), cross_rgb_weights)
+        parallel = np.einsum('nhwc,nc->hwc', np.stack(parallels, axis=0), parallel_rgb_weights)
 
         # normalize to [0,1]
         static = static if '.exr' in static_path else static / 255.0
-        cross = cross if '.exr' in cross_path else cross / 255.0
-        parallel = parallel if '.exr' in parallel_path else parallel / 255.0
+        cross = cross if '.exr' in cross_path[0] else cross / 255.0
+        parallel = parallel if '.exr' in parallel_path[0] else parallel / 255.0
         albedo = albedo if '.exr' in albedo_path else albedo / 255.0
         normal = normal if '.exr' in normal_path else normal / 255.0
         specular = specular if '.exr' in specular_path else specular / 255.0
@@ -400,13 +482,15 @@ class LightstageDataset(Dataset):
         specular = np.nan_to_num(specular)
         sigma = np.nan_to_num(sigma)
         mask = np.nan_to_num(mask)
+
+        # swap x and z to align with the lotus/rgb2x
+        # TODO: check rotation matrix as well
+        normal[:,:,0] *= -1.
+        # normal = normal[:, :, [2, 1, 0]]
+        # normal_w2c = normal_w2c[:, :, [2, 1, 0]]
         
         # normal is world space normal, transform it to camera space
         normal_w2c = np.einsum('ij, hwi -> hwj', R, normal)
-
-        # swap x and z to align with the lotus/rgb2x
-        normal = normal[:, :, [2, 1, 0]]
-        normal_w2c = normal_w2c[:, :, [2, 1, 0]]
 
         # apply transforms
         static = self.transforms(static)
@@ -429,6 +513,7 @@ class LightstageDataset(Dataset):
         example['specular_value'] = specular.repeat(3, 1, 1) # repeat to 3 channels
         example['sigma_value'] = sigma
         example['mask_value'] = mask
+        example['augmented'] = augmented
         
         return example
     
@@ -469,11 +554,16 @@ def collate_fn_lightstage(examples):
     
     mask_values = torch.stack([example['mask_value'] for example in examples])
     mask_values = mask_values.to(memory_format=torch.contiguous_format).float()
+    
+    # get pixel values by augment
+    pixel_values = torch.stack([example['static_value'] if not example['augmented'] else example['cross_value'] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
     return {
         # values
-        # "static_values": static_values,
-        "pixel_values": static_values, # hack
+        # "pixel_values": static_values, # hack
+        "pixel_values": pixel_values, # hack
+        "static_values": static_values,
         "cross_values": cross_values,
         "parallel_values": parallel_values,
         # "albedo_values": albedo_values,
