@@ -192,6 +192,13 @@ class LightstageDataset(Dataset):
                 parallel_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
                 cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
                 parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
+            elif self.lighting_augmentation == 'random16':
+                random_lights = np.random.choice(self.omega_i_world.shape[0], 16, replace=False)
+                random_lights = [int(x) + 2 for x in random_lights]
+                cross_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
+                parallel_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
+                cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
+                parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
             elif self.lighting_augmentation == 'hdri':
                 pass
             assert type(cross_path) == list, f'cross_path should be a list, got {type(cross_path)}'

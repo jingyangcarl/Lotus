@@ -41,7 +41,7 @@ export TIMESTEP=999
 export TASK_NAME="normal"
 
 # data augmentatoin
-export AUG_RATIO="1:0"
+export AUG_RATIO="1:1"
 export AUG_TYPE="random8"
 
 # eval
@@ -52,7 +52,7 @@ export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/aug_eval/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-0-random8"
+export OUTPUT_DIR="output/aug_eval/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random8"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

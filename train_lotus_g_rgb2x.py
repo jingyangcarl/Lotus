@@ -837,7 +837,7 @@ def parse_args():
         "--lightstage_lighting_augmentation",
         type=str,
         default="random8",
-        choices=["random8", "hdri", "none"],
+        choices=["random8", "random16", "hdri", "none"],
     )
     parser.add_argument(
         "--lightstage_original_augmentation_ratio",

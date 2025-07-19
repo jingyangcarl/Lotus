@@ -52,7 +52,7 @@ export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/aug_eval/train-rgb2x-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random16"
+export OUTPUT_DIR="output/aug_eval/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random16"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -91,4 +91,5 @@ accelerate launch --mixed_precision="fp16" \
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
+  --use_lora \
   --save_pred_vis
