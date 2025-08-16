@@ -1,8 +1,8 @@
 # export PYTHONPATH="$(dirname "$(dirname "$0")"):$PYTHONPATH"
 
 # export MODEL_NAME="stabilityai/stable-diffusion-2-base"
-export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-# export MODEL_NAME="zheng95z/rgb-to-x"
+# export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
+export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
 # Set environment variables based on machine name
@@ -34,15 +34,15 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6
 
 # model configs
 export TIMESTEP=999
-export TASK_NAME="normal"
+export TASK_NAME="albedo"
 
 # data augmentatoin
 export AUG_RATIO="1:1"
-export AUG_TYPE="random16"
+export AUG_TYPE="random8"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -52,7 +52,7 @@ export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/aug_eval/train-lotus-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random16"
+export OUTPUT_DIR="output/albedo/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random8"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

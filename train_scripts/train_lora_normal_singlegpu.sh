@@ -1,8 +1,8 @@
 # export PYTHONPATH="$(dirname "$(dirname "$0")"):$PYTHONPATH"
 
 # export MODEL_NAME="stabilityai/stable-diffusion-2-base"
-# export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-export MODEL_NAME="zheng95z/rgb-to-x"
+export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
+# export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
 # Set environment variables based on machine name
@@ -52,7 +52,7 @@ export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/aug_eval/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random8"
+export OUTPUT_DIR="output/aug_eval/train-lotus-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1-random8"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

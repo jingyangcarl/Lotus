@@ -60,6 +60,22 @@ def normal_to_rgb(normal, normal_mask=None):
         normal_rgb = normal_rgb * normal_mask     # (B, H, W, 3)
     return normal_rgb
 
+def albedo_to_rgb(albedo, albedo_mask=None):
+    """ surface normal map to RGB
+        (used for visualization)
+
+        NOTE: x, y, z are mapped to R, G, B
+        NOTE: [-1, 1] are mapped to [0, 255]
+    """
+    if torch.is_tensor(albedo):
+        albedo = tensor_to_numpy(albedo)
+        albedo_mask = tensor_to_numpy(albedo_mask)
+
+    albedo_rgb = (albedo * 255).astype(np.uint8)
+    if albedo_mask is not None:
+        albedo_rgb = albedo_rgb * albedo_mask     # (B, H, W, 3)
+    return albedo_rgb
+
 def kappa_to_alpha(pred_kappa, to_numpy=True):
     """ Confidence kappa to uncertainty alpha
         Assuming AngMF distribution (introduced in https://arxiv.org/abs/2109.09881)
@@ -115,5 +131,45 @@ def visualize_normal(target_dir, prefixs, img, pred_norm, pred_kappa,
             plt.imsave(target_path, normal_to_rgb(gt_norm[i, ...], gt_norm_mask[i, ...]))
 
             E = pred_error[i, :, :, 0] * gt_norm_mask[i, :, :, 0]
+            target_path = '%s/%s_pred_error.png' % (target_dir, prefixs[i])
+            plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')
+
+
+def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
+                        gt_albedo, gt_albedo_mask, pred_error, num_vis=-1):
+    """ visualize normal
+    """
+    error_max = 60.0
+
+    img = tensor_to_numpy(img)                      # (B, H, W, 3)
+    pred_albedo = tensor_to_numpy(pred_albedo)          # (B, H, W, 3)
+    pred_kappa = tensor_to_numpy(pred_kappa)        # (B, H, W, 1)
+    gt_albedo = tensor_to_numpy(gt_albedo)              # (B, H, W, 3)
+    gt_albedo_mask = tensor_to_numpy(gt_albedo_mask)    # (B, H, W, 1)
+    pred_error = tensor_to_numpy(pred_error)        # (B, H, W, 1)
+
+    num_vis = len(prefixs) if num_vis == -1 else num_vis
+    for i in range(num_vis):
+        # img
+        img_ = unnormalize(img[i, ...])
+        target_path = '%s/%s_img.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, img[i, ...])
+
+        # pred_norm 
+        target_path = '%s/%s_albedo.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, pred_albedo[i, ...])
+
+        # pred_kappa
+        if pred_kappa is not None:
+            pred_alpha = kappa_to_alpha(pred_kappa[i, :, :, 0])
+            target_path = '%s/%s_pred_alpha.png' % (target_dir, prefixs[i])
+            plt.imsave(target_path, pred_alpha, vmin=0.0, vmax=error_max, cmap='jet')
+
+        # gt_norm, pred_error
+        if gt_albedo is not None:
+            target_path = '%s/%s_gt.png' % (target_dir, prefixs[i])
+            plt.imsave(target_path, gt_albedo[i, ...])
+
+            E = pred_error[i, :, :, 0] * gt_albedo_mask[i, :, :, 0]
             target_path = '%s/%s_pred_error.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')

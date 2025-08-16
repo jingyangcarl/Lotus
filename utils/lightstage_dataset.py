@@ -26,7 +26,8 @@ class LightstageDataset(Dataset):
         
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
         self.root_dir = '/home/jyang/data/LightStageObjectDB' # local cache, no IO bottle neck
-        img_ext = 'exr' # 'exr' or 'jpg' # TODO: jpg need to updated to compatible with negative values, running now
+        img_ext = 'jpg' # 'exr' or 'jpg' # TODO: jpg need to updated to compatible with negative values, running now
+        # when use exr, the evaluation results may look different to the validation due to 
         # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.csv'
@@ -62,6 +63,7 @@ class LightstageDataset(Dataset):
                 
                 if n_cross == 350 and n_paral == 350:
                     for l in range(350):
+                    # for l in range(10): # debug
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':
@@ -84,6 +86,9 @@ class LightstageDataset(Dataset):
                         
                     expansion_counter += 1
                 else:
+                    if split == 'train':
+                        # print(f'Skipping {row["obj"]} at cam{row["cam"]:02d} with {n_cross} cross lights and {n_paral} parallel lights, not equal lights for training.')
+                        pass
                     metadata_.append(row)
             print(f'Expanded metadata from {len(metadata)} to {len(metadata_)} by adding lighting index, {expansion_counter} objects expanded.')
             metadata = metadata_
@@ -135,18 +140,22 @@ class LightstageDataset(Dataset):
                 pass
 
             # we use first 0.8 of the data for training, and last 0.2 for validation
-            train_eval_split = 0.95
+            train_eval_split = 0.8
             if split == 'train':
                 if rowidx / len(metadata) >= train_eval_split:
                     continue
                 else:
                     pass
             elif split == 'test':
-                if rowidx / len(metadata) < train_eval_split:
+                # if rowidx / len(metadata) < train_eval_split:
+                if rowidx / len(metadata) < train_eval_split or metadata[rowidx]['obj'] != 'woodball': # debug use woodball
                     continue
                 else:
+                    # filter out those lighting != 2 to evaluate only the static lighting
+                    if metadata[rowidx]['l'] != 2: # l==0 is filtered earlier via the general filter
+                        continue
                     pass
-            
+
             self.texts.append(row)
             self.objs.append(row["obj"])
             self.augmented.append(row['aug'])
@@ -239,19 +248,19 @@ class LightstageDataset(Dataset):
             
             # check if 'woodball' is in the objs, put to the first when exist
             # assert 'woodball' in self.objs, f'woodball is not in the objs: {self.objs}, this is for debugging purpose'
-            # woodball_idx = self.objs.index('woodball')
-            # debug_texts = [self.texts[woodball_idx], self.texts[woodball_idx+7]]
-            # debug_objs = [self.objs[woodball_idx], self.objs[woodball_idx+7]]
-            # debug_camera_paths = [self.camera_paths[woodball_idx], self.camera_paths[woodball_idx+7]]
-            # debug_static_paths = [self.static_paths[woodball_idx], self.static_paths[woodball_idx+7]]
-            # debug_static_cross_paths = [self.static_cross_paths[woodball_idx], self.static_cross_paths[woodball_idx+7]]
-            # debug_static_parallel_paths = [self.static_parallel_paths[woodball_idx], self.static_parallel_paths[woodball_idx+7]]
-            # debug_cross_paths = [self.cross_paths[woodball_idx], self.cross_paths[woodball_idx+7]]
-            # debug_parallel_paths = [self.parallel_paths[woodball_idx], self.parallel_paths[woodball_idx+7]]
-            # debug_albedo_paths = [self.albedo_paths[woodball_idx], self.albedo_paths[woodball_idx+7]]
-            # debug_normal_paths = [self.normal_paths[woodball_idx], self.normal_paths[woodball_idx+7]]
-            # debug_specular_paths = [self.specular_paths[woodball_idx], self.specular_paths[woodball_idx+7]]
-            # debug_sigma_paths = [self.sigma_paths[woodball_idx], self.sigma_paths[woodball_idx+7]]
+            woodball_idx = self.objs.index('woodball')
+            debug_texts = [self.texts[woodball_idx], self.texts[woodball_idx+7]]
+            debug_objs = [self.objs[woodball_idx], self.objs[woodball_idx+7]]
+            debug_camera_paths = [self.camera_paths[woodball_idx], self.camera_paths[woodball_idx+7]]
+            debug_static_paths = [self.static_paths[woodball_idx], self.static_paths[woodball_idx+7]]
+            debug_static_cross_paths = [self.static_cross_paths[woodball_idx], self.static_cross_paths[woodball_idx+7]]
+            debug_static_parallel_paths = [self.static_parallel_paths[woodball_idx], self.static_parallel_paths[woodball_idx+7]]
+            debug_cross_paths = [self.cross_paths[woodball_idx], self.cross_paths[woodball_idx+7]]
+            debug_parallel_paths = [self.parallel_paths[woodball_idx], self.parallel_paths[woodball_idx+7]]
+            debug_albedo_paths = [self.albedo_paths[woodball_idx], self.albedo_paths[woodball_idx+7]]
+            debug_normal_paths = [self.normal_paths[woodball_idx], self.normal_paths[woodball_idx+7]]
+            debug_specular_paths = [self.specular_paths[woodball_idx], self.specular_paths[woodball_idx+7]]
+            debug_sigma_paths = [self.sigma_paths[woodball_idx], self.sigma_paths[woodball_idx+7]]
             
             debug_texts = []
             debug_objs = []
@@ -268,8 +277,11 @@ class LightstageDataset(Dataset):
             debug_mask_paths = []
 
             # get index samples with step s and crop by eval_first_n
-            eval_idx = list(range(0, len(self.texts), 64))
-            eval_idx = eval_idx[:eval_first_n-2]  # -2 for the woodball samples
+            # eval_idx = list(range(0, len(self.texts), 64))
+            n_samples_per_object = 8 # 8 samples per object, this is the number without olat
+            n_sample_camera = 2
+            eval_idx = list(range(0, len(self.texts), n_samples_per_object // n_sample_camera)) # 8/2 = 4, so every 4th sample, this results in 2 samples per object
+            eval_idx = eval_idx[:eval_first_n]
 
             # truncate to eval_first_n            
             self.texts = debug_texts + [self.texts[i] for i in eval_idx]
@@ -458,12 +470,13 @@ class LightstageDataset(Dataset):
         parallels = [imageio.imread(parallel_path_) for parallel_path_ in self.parallel_paths[idx]]
         cross = np.einsum('nhwc,nc->hwc', np.stack(crosses, axis=0), cross_rgb_weights)
         parallel = np.einsum('nhwc,nc->hwc', np.stack(parallels, axis=0), parallel_rgb_weights)
+        parallel_hstacked = np.hstack(parallels) if len(parallels) > 1 else parallel # for visualization purpose
 
         # normalize to [0,1]
         static = static if '.exr' in static_path else static / 255.0
         cross = cross if '.exr' in cross_path[0] else cross / 255.0
         parallel = parallel if '.exr' in parallel_path[0] else parallel / 255.0
-        albedo = albedo if '.exr' in albedo_path else albedo / 255.0
+        albedo = albedo if '.exr' in albedo_path else albedo / 255.0 * 4. # albedo is too dark
         normal = normal if '.exr' in normal_path else normal / 255.0
         specular = specular if '.exr' in specular_path else specular / 255.0
         sigma = sigma if '.exr' in sigma_path else sigma / 255.0
@@ -471,7 +484,7 @@ class LightstageDataset(Dataset):
         
         # hdr to ldr via Apply simple Reinhard tone mapping
         # static = self.tonemap.process(static)
-        static = static.clip(0, 1)
+        # static = static.clip(0, 1)
         cross = cross.clip(0, 1)
         parallel = parallel.clip(0, 1)
         albedo = albedo.clip(0, 1)
@@ -498,6 +511,32 @@ class LightstageDataset(Dataset):
         
         # normal is world space normal, transform it to camera space
         normal_w2c = np.einsum('ij, hwi -> hwj', R, normal)
+        
+        def hdr2ldr(img):
+            """
+            Convert HDR image to LDR using Reinhard tone mapping.
+            """
+            img = img.clip(0, None)
+            img = img / (img + 1.0)  # Simple Reinhard tone mapping
+            img = img.clip(0, 1)  # Ensure values are in [0, 1]
+            return img
+        
+        def normalizergb(rgb):
+            """
+            Normalize RGB image to [0, 1] range.
+            """
+            rgb = rgb.clip(0, None)
+            rgb = rgb / (rgb.max() + 1e-8)
+            rgb = rgb.clip(0, 1)  # Ensure values are in [0, 1]
+            return rgb
+        
+        if 'exr' in static_path:
+            # static is already in [0, 1] range, but we apply tone mapping for consistency
+            static = hdr2ldr(static)
+            static = normalizergb(static)  # Normalize static RGB values
+        if 'exr' in cross_path[0]:
+            albedo = hdr2ldr(albedo)
+            albedo = normalizergb(albedo)  # Normalize albedo RGB values
 
         # apply transforms
         static = self.transforms(static)
@@ -509,6 +548,7 @@ class LightstageDataset(Dataset):
         specular = self.transforms(specular)
         sigma = self.transforms(sigma)
         mask = self.transforms(mask)
+        parallel_hstacked = self.transforms(parallel_hstacked)
         
         # get bounding box
         example['static_value'] = static
@@ -521,6 +561,7 @@ class LightstageDataset(Dataset):
         example['sigma_value'] = sigma
         example['mask_value'] = mask
         example['augmented'] = augmented
+        example['parallel_value_hstacked'] = parallel_hstacked
         
         return example
     
@@ -543,6 +584,9 @@ def collate_fn_lightstage(examples):
 
     parallel_values = torch.stack([example['parallel_value'] for example in examples])
     parallel_values = parallel_values.to(memory_format=torch.contiguous_format).float()
+    
+    parallel_values_hstacked = torch.stack([example['parallel_value_hstacked'] for example in examples])
+    parallel_values_hstacked = parallel_values_hstacked.to(memory_format=torch.contiguous_format).float()
 
     albedo_values = torch.stack([example['albedo_value'] for example in examples])
     albedo_values = albedo_values.to(memory_format=torch.contiguous_format).float()
@@ -573,8 +617,8 @@ def collate_fn_lightstage(examples):
         "static_values": static_values,
         "cross_values": cross_values,
         "parallel_values": parallel_values,
-        # "albedo_values": albedo_values,
-        "diffuse_values": albedo_values,
+        "parallel_values_hstacked": parallel_values_hstacked, # hstacked parallel values for visualization
+        "albedo_values": albedo_values,
         "normal_values": normal_w2c_values, # camera space normal
         "normal_c2w_values": normal_c2w_values,
         "specular_values": specular_values,
@@ -584,8 +628,7 @@ def collate_fn_lightstage(examples):
         "static_pathes": static_pathes,
         "cross_pathes": cross_pathes,
         "parallel_pathes": parallel_pathes,
-        # "albedo_pathes": albedo_pathes,
-        "diffuse_pathes": albedo_pathes,
+        "albedo_pathes": albedo_pathes,
         "normal_pathes": normal_pathes,
         "specular_pathes": specular_pathes,
         "sigma_pathes": sigma_pathes,

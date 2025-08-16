@@ -183,6 +183,7 @@ def run_rgb2x_example_validation(
     
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
+    validation_images = validation_images[:args.validation_top_k] if args.validation_top_k > 0 else validation_images
     
     pred_annos = []
     input_images = []
@@ -283,6 +284,7 @@ def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps
 def run_lotus_example_validation(pipeline, task, args, step, accelerator, generator, model_alias='model'):
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
+    validation_images = validation_images[:args.validation_top_k] if args.validation_top_k > 0 else validation_images
     
     pred_annos = []
     input_images = []
@@ -382,6 +384,7 @@ def run_lotus_example_validation(pipeline, task, args, step, accelerator, genera
 def run_dsine_example_validation(normal_predictor, task, args, step, accelerator, generator, model_alias='dsine'):
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
+    validation_images = validation_images[:args.validation_top_k] if args.validation_top_k > 0 else validation_images
     
     pred_annos = []
     input_images = []
@@ -691,6 +694,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     enable_eval = True
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+        assert args.task_name[0] in ['normal', 'depth'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
         if args.use_lora:
             wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             # wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
@@ -698,6 +702,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+        assert args.task_name[0] in ['albedo', 'normal'], f"{args.pretrained_model_name_or_path} pipeline support albedo and normal estimation task."
         if args.use_lora:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
             # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
@@ -706,9 +711,12 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     # generate pretrained results
     if step == 0:
-        wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
-        wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-        wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+        if args.task_name == 'normal':
+            wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
+            wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+            wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+        elif args.task_name == 'albedo':
+            wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
     else:
         pass
         
@@ -896,6 +904,11 @@ def parse_args():
         "--evaluation_steps",
         type=int,
         default=5000,
+    )
+    parser.add_argument(
+        "--validation_top_k",
+        type=int,
+        default=0,
     )
     parser.add_argument(
         "--evaluation_top_k",
@@ -1623,14 +1636,21 @@ def main():
                 if args.task_name[0] == "depth":
                     TAR_ANNO = "depth_values"
                 elif args.task_name[0] == "normal":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'lotus-normal-g-v1-1', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for normal estimation'
                     TAR_ANNO = "normal_values"
+                elif args.task_name[0] == "albedo":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for albedo estimation'
+                    TAR_ANNO = "albedo_values"
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 
                 if 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # negate the x channel to adapt to the pretrained weights
                     # the adjusted normals aligns to the lotus normal space
-                    batch[TAR_ANNO][:, 0, :, :] *= -1 # [B, 3, h, w]
+                    if TAR_ANNO == "normal_values":
+                        batch[TAR_ANNO][:, 0, :, :] *= -1 # [B, 3, h, w]
+                    else:
+                        pass
                 else:
                     pass
                 
@@ -1728,7 +1748,12 @@ def main():
                     )
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # prompt = "Albedo (diffuse basecolor)"
-                    prompt = "Camera-space Normal" # checked, this is correct during the training
+                    if args.task_name[0] == "normal":
+                        prompt = "Camera-space Normal" # checked, this is correct during the training
+                    elif args.task_name[0] == "albedo":
+                        prompt = "Albedo (diffuse basecolor)" # checked, this is correct during the training
+                    else:
+                        raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                     # prompt = ""
                     # from StableDiffusionAOVMatEstPipeline::_encode_prompt
                     text_inputs = tokenizer(
@@ -1857,6 +1882,31 @@ def main():
                             )
                 
                 if global_step % validation_steps == 0:
+                    
+                    # save out augmented images
+                    if 'parallel_values' in batch:
+                        for i in range(len(batch['parallel_values'])):
+                            objname = '_'.join(batch['static_pathes'][i].split('/')[-3:-1]).split('.')[0]
+                            img = batch['parallel_values'][i].cpu().numpy().transpose(1, 2, 0)
+                            img = Image.fromarray((img * 255).astype(np.uint8))
+                            visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}')
+                            os.makedirs(visual_outpath, exist_ok=True)
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_augmented_olat_parallel.png"))
+                            
+                            img = batch['parallel_values_hstacked'][i].cpu().numpy().transpose(1, 2, 0)
+                            img = Image.fromarray((img * 255).astype(np.uint8))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_augmented_olat_parallel_hstacked.png"))
+                            
+                            img = batch['static_values'][i].cpu().numpy().transpose(1, 2, 0)
+                            img = Image.fromarray((img * 255).astype(np.uint8))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_static.png"))
+                            
+                            img = batch['albedo_values'][i].cpu().numpy().transpose(1, 2, 0)
+                            img = Image.fromarray((img * 255).astype(np.uint8))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_albedo.png"))
+                            
+                            # TODO: save out the olat hdri
+                    
                     log_validation(
                         vae,
                         text_encoder,
