@@ -845,7 +845,7 @@ def parse_args():
         "--lightstage_lighting_augmentation",
         type=str,
         default="random8",
-        choices=["random8", "random16", "hdri", "none"],
+        choices=["random8", "random16", "-random8", "-random16", "hdri", "none"],
     )
     parser.add_argument(
         "--lightstage_original_augmentation_ratio",
@@ -1380,6 +1380,8 @@ def main():
             # Set the training transforms
             train_dataset_hypersim = train_hypersim_dataset.with_transform(preprocess_train_hypersim)
 
+        # The best thing to do is to increase the num_workers slowly and stop once there is no more improvement in your training speed.
+        # https://lightning.ai/docs/pytorch/stable/advanced/speed.html
         train_dataloader_hypersim = torch.utils.data.DataLoader(
             train_dataset_hypersim,
             shuffle=True,
@@ -1641,6 +1643,7 @@ def main():
                 elif args.task_name[0] == "albedo":
                     assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for albedo estimation'
                     TAR_ANNO = "albedo_values"
+                    # TAR_ANNO = "static_values"
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 
