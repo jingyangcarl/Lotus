@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import os
 
 import torch
 
@@ -152,24 +153,33 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
     for i in range(num_vis):
         # img
         img_ = unnormalize(img[i, ...])
-        target_path = '%s/%s_img.png' % (target_dir, prefixs[i])
+        target_path = '%s/%s/img.png' % (target_dir, prefixs[i])
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
         plt.imsave(target_path, img[i, ...])
 
         # pred_norm 
-        target_path = '%s/%s_albedo.png' % (target_dir, prefixs[i])
+        target_path = '%s/%s/pred_albedo.png' % (target_dir, prefixs[i])
         plt.imsave(target_path, pred_albedo[i, ...])
 
         # pred_kappa
         if pred_kappa is not None:
             pred_alpha = kappa_to_alpha(pred_kappa[i, :, :, 0])
-            target_path = '%s/%s_pred_alpha.png' % (target_dir, prefixs[i])
+            target_path = '%s/%s/pred_alpha.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, pred_alpha, vmin=0.0, vmax=error_max, cmap='jet')
 
         # gt_norm, pred_error
         if gt_albedo is not None:
-            target_path = '%s/%s_gt.png' % (target_dir, prefixs[i])
+            target_path = '%s/%s/gt_albedo.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, gt_albedo[i, ...])
 
             E = pred_error[i, :, :, 0] * gt_albedo_mask[i, :, :, 0]
-            target_path = '%s/%s_pred_error.png' % (target_dir, prefixs[i])
+            target_path = '%s/%s/pred_error.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')
+                
+        # img, albedo, gt, error
+        all_imgs = [img_/255., pred_albedo[i, ...], gt_albedo[i, ...], plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
+        target_path = '%s/%s.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, all_imgs)
+        
+    return all_imgs

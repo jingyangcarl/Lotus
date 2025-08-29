@@ -41,8 +41,8 @@ export TIMESTEP=999
 export TASK_NAME="albedo"
 
 # data augmentatoin
-export AUG_RATIO="1:0"
-export AUG_TYPE="random8"
+export AUG_RATIO="1:1"
+export AUG_TYPE="-random8"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -52,7 +52,7 @@ export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 
 # output dir
-export OUTPUT_DIR="output/albedo/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-0-random8"
+export OUTPUT_DIR="output/albedo/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1_-random8_0.5weighting_pairloss_disable_w_eval"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -67,6 +67,7 @@ accelerate launch --mixed_precision="fp16" \
   --prob_lightstage=$P_LIGHTSTAGE \
   --lightstage_lighting_augmentation=$AUG_TYPE \
   --lightstage_original_augmentation_ratio=$AUG_RATIO \
+  --lightstage_lighting_augmentation_pair_n=2 \
   --mix_dataset \
   --random_flip \
   --align_cam_normal \

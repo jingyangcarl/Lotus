@@ -112,10 +112,14 @@ def rgb2x(
     generator,
     inference_step = 50,
     num_samples = 1,
+    img_rgb = None,
 ):
     # generator = torch.Generator(device="cuda").manual_seed(seed)
     
-    photo = load_image(img_path).to(accelerator.device)
+    if img_rgb is None:
+        photo = load_image(img_path).to(accelerator.device)
+    else:
+        photo = img_rgb.to(accelerator.device)
 
     # Check if the width and height are multiples of 8. If not, crop it using torchvision.transforms.CenterCrop
     old_height = photo.shape[1]
@@ -669,6 +673,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
             run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            pass
 
         del pipeline_rgb2x
 
@@ -846,6 +851,17 @@ def parse_args():
         type=str,
         default="random8",
         choices=["random8", "random16", "-random8", "-random16", "hdri", "none"],
+    )
+    parser.add_argument(
+        "--lightstage_lighting_augmentation_pair_n",
+        type=int,
+        default=2,
+        help="The number of lighting pairs to use for lightstage augmentation. If set to 1, no paired-training will be enabled.",
+    )
+    parser.add_argument(
+        "--lightstage_augmentation_pair_loss_enable",
+        action="store_true",
+        help="Whether to enable the paired training loss for lightstage augmentation.",
     )
     parser.add_argument(
         "--lightstage_original_augmentation_ratio",
@@ -1419,7 +1435,7 @@ def main():
     if db_prob["lightstage"] > 0:
         print("Loading lightstage dataset...")
         tik = time.time()
-        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation)
+        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, lighting_aug_pair_n=args.lightstage_lighting_augmentation_pair_n,)
         train_dataloader_lightstage = torch.utils.data.DataLoader(
             train_dataset_lightstage,
             shuffle=True,
@@ -1593,6 +1609,7 @@ def main():
         train_loss = 0.0
         log_ann_loss = 0.0
         log_rgb_loss = 0.0
+        log_rgb_pair_loss = 0.0
 
         # for _ in range(len(train_dataloader_hypersim)):
         for _ in range(db_samples):
@@ -1675,6 +1692,7 @@ def main():
                     rgb_latents = rgb_latents[:bsz_per_task] # [B, 4, h, w], use bsz_per_task here, since the batch sample can be smaller than args.train_batch_size
                     target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
                     bsz = rgb_latents.shape[0] # update bsz to the real batch size
+                    
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
@@ -1699,8 +1717,10 @@ def main():
                     noise += args.noise_offset * torch.randn(
                         (target_latents.shape[0], target_latents.shape[1], 1, 1), device=target_latents.device
                     )
+                    raise NotImplementedError("Noise offset is not implemented for lightstage_augmentation_pair_loss_enable. ")
                 if args.input_perturbation:
                     new_noise = noise + args.input_perturbation * torch.randn_like(noise)
+                    raise NotImplementedError("Input perturbation is not implemented for lightstage_augmentation_pair_loss_enable. ")
                 
                 # Set timestep
                 # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
@@ -1717,8 +1737,7 @@ def main():
                         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
                     
                     # Sample a random timestep for each image
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [2B,]
-                    # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device).long() # [2B,]
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [B,]
                     pass
                 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -1726,7 +1745,7 @@ def main():
                 if args.input_perturbation:
                     noisy_latents = noise_scheduler.add_noise(target_latents, new_noise, timesteps)
                 else:
-                    noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps) # [2B, 4, h, w]
+                    noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
 
                 # Concatenate rgb and depth
                 if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
@@ -1736,7 +1755,7 @@ def main():
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
                     unet_input = torch.cat(
                         [noisy_latents, rgb_latents], dim=1
-                    ) # [2B, 8, h, w]
+                    ) # [B, 8, h, w]
 
                 # Get the empty text embedding for conditioning
                 # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
@@ -1790,13 +1809,37 @@ def main():
                     # Compute loss
                     anno_loss = F.mse_loss(model_pred[:bsz_per_task][valid_mask_down_anno].float(), target[:bsz_per_task][valid_mask_down_anno].float(), reduction="mean")
                     rgb_loss = F.mse_loss(model_pred[bsz_per_task:][valid_mask_down_rgb].float(), target[bsz_per_task:][valid_mask_down_rgb].float(), reduction="mean")
-                    loss = anno_loss + rgb_loss
+                    rgb_pair_loss = 0*anno_loss
+                    loss = anno_loss + rgb_loss + rgb_pair_loss
 
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                    
+                    # use pair loss for lightstage augmentation
+                    if args.lightstage_augmentation_pair_loss_enable:
+                        
+                        # batch["parallel_values"] in shape [B, pair, 3, h, w], 0 used for agumentation, use 1 for pair
+                        parallel_latents = vae.encode(
+                            batch["parallel_values"][:,-1,...].to(weight_dtype) # 
+                        ).latent_dist.sample() # [B, 4, h, w]
+                        parallel_latents = parallel_latents * vae.config.scaling_factor
+                        noise_pair = torch.randn_like(target_latents) # [B, 4, h, w]
+                        noise_pair_latents = noise_scheduler.add_noise(target_latents, noise_pair, timesteps)
+                        
+                        # build unet input pair
+                        unet_input_pair = torch.cat([noise_pair_latents, parallel_latents], dim=1)
+                        assert unet_input_pair.shape == unet_input.shape, f"unet_input_pair shape {unet_input_pair.shape} does not match unet_input shape {unet_input.shape}"
+                    
+                        # B->2B
+                        unet_input = torch.cat([unet_input, unet_input_pair], dim=0)
+                        timesteps = torch.cat([timesteps, timesteps], dim=0)
+                        encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states], dim=0)
+                        valid_mask_down_anno = torch.cat([valid_mask_down_anno, valid_mask_down_anno], dim=0)
+                        target_latents = torch.cat([target_latents, target_latents], dim=0)
+                        noise = torch.cat([noise, noise_pair], dim=0)
+                    
                     # ValueError: class_labels should be provided when num_class_embeds > 0
                     # rgb2x uses prompt to control instead of class_labels
                     # makesure unet_input uses the correct component,
-                    # model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [2B, 4, h, w]
                     model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [B, 4, h, w]
                     
                     # rgb2x use v-prediction claimed in paper (https://arxiv.org/pdf/2405.00666) Sec. 4. 
@@ -1804,18 +1847,34 @@ def main():
                     # reference: https://github.com/prs-eth/Marigold/blob/main/src/trainer/marigold_normals_trainer.py
                     assert noise_scheduler.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
                     target = noise_scheduler.get_velocity(target_latents, noise, timesteps)
+                    
+                    # ------- add x0-consistency between paired halves -------
+                    # utilities to extract per-t scalars in broadcast shape
+                    def _extract(a, t, x_shape):
+                        # a: [num_steps] tensor or buffer on the same device
+                        return a.gather(0, t).reshape(-1, *([1] * (len(x_shape) - 1)))
+
+                    # alphas_cumprod is used by DDPM-like schedulers
+                    alphas_cumprod = noise_scheduler.alphas_cumprod.to(unet_input.device)
+                    alpha_t = _extract(torch.sqrt(alphas_cumprod), timesteps, unet_input.shape)
+                    sigma_t = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps, unet_input.shape)
+                    denom = alpha_t**2 + sigma_t**2
+                    x0_pred = (alpha_t * unet_input[:,:bsz_per_task] - sigma_t * model_pred) / denom  # [B,4,h,w]
 
                     # Compute loss
                     anno_loss = F.mse_loss(model_pred[valid_mask_down_anno].float(), target[valid_mask_down_anno].float(), reduction="mean")
                     rgb_loss = 0*anno_loss # no rgb loss in rgb2x
-                    loss = anno_loss + rgb_loss
+                    rgb_pair_loss = F.mse_loss(x0_pred[:bsz_per_task][valid_mask_down_anno[:bsz_per_task]].float(), x0_pred[bsz_per_task:][valid_mask_down_anno[bsz_per_task:]].float(), reduction="mean") if args.lightstage_augmentation_pair_loss_enable else 0*anno_loss
+                    loss = anno_loss + rgb_loss + rgb_pair_loss
 
                 # Gather loss
                 avg_anno_loss = accelerator.gather(anno_loss.repeat(args.train_batch_size)).mean()
                 log_ann_loss += avg_anno_loss.item() / args.gradient_accumulation_steps
                 avg_rgb_loss = accelerator.gather(rgb_loss.repeat(args.train_batch_size)).mean()
                 log_rgb_loss += avg_rgb_loss.item() / args.gradient_accumulation_steps
-                train_loss = log_ann_loss + log_rgb_loss
+                avg_rgb_pair_loss = accelerator.gather(rgb_pair_loss.repeat(args.train_batch_size)).mean()
+                log_rgb_pair_loss = avg_rgb_pair_loss.item() / args.gradient_accumulation_steps if args.lightstage_augmentation_pair_loss_enable else 0.0
+                train_loss = log_ann_loss + log_rgb_loss + log_rgb_pair_loss
 
                 # Backpropagate
                 accelerator.backward(loss)
@@ -1828,6 +1887,7 @@ def main():
             logs = {"SL": loss.detach().item(), 
                     "SL_A": anno_loss.detach().item(), 
                     "SL_R": rgb_loss.detach().item(), 
+                    "SL_RP": rgb_pair_loss.detach().item(),
                     "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
         
@@ -1837,11 +1897,13 @@ def main():
                 global_step += 1
                 accelerator.log({"train_loss": train_loss,
                                 "anno_loss": log_ann_loss,
-                                "rgb_loss": log_rgb_loss},
+                                "rgb_loss": log_rgb_loss,
+                                "rgb_pair_loss": log_rgb_pair_loss,},
                                  step=global_step)
                 train_loss = 0.0
                 log_ann_loss = 0.0
                 log_rgb_loss = 0.0
+                log_rgb_pair_loss = 0.0
 
                 checkpointing_steps = args.checkpointing_steps
                 validation_steps = args.validation_steps
@@ -1890,23 +1952,29 @@ def main():
                     if 'parallel_values' in batch:
                         for i in range(len(batch['parallel_values'])):
                             objname = '_'.join(batch['static_pathes'][i].split('/')[-3:-1]).split('.')[0]
-                            img = batch['parallel_values'][i].cpu().numpy().transpose(1, 2, 0)
-                            img = Image.fromarray((img * 255).astype(np.uint8))
-                            visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}')
-                            os.makedirs(visual_outpath, exist_ok=True)
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_augmented_olat_parallel.png"))
+                            
+                            for j in range(batch['parallel_values'][i].shape[0]):
+                                img = batch['parallel_values'][i][j].cpu().numpy().transpose(1, 2, 0)
+                                img = Image.fromarray((img * 255).astype(np.uint8))
+                                visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}')
+                                os.makedirs(visual_outpath, exist_ok=True)
+                                img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_augmented_olat_parallel_pair{j:02d}.png"))
                             
                             img = batch['parallel_values_hstacked'][i].cpu().numpy().transpose(1, 2, 0)
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_augmented_olat_parallel_hstacked.png"))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_augmented_olat_parallel_hstacked.png"))
                             
                             img = batch['static_values'][i].cpu().numpy().transpose(1, 2, 0)
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_static.png"))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_static.png"))
                             
                             img = batch['albedo_values'][i].cpu().numpy().transpose(1, 2, 0)
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_albedo.png"))
+                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_albedo.png"))
+                            
+                            # pred_decode = vae.decode(
+                            #     batch['pixel_values'][i].unsqueeze(0).to(weight_dtype)
+                            # ).sample
                             
                             # TODO: save out the olat hdri
                     

@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms.functional import pil_to_tensor, resize, InterpolationMode
 from tqdm.auto import tqdm
 import cv2
+import matplotlib.pyplot as plt
 
 from .dataset_depth import (
     BaseDepthDataset,
@@ -435,103 +436,119 @@ def evaluation_material(
                 # _, _, orig_H, orig_W = img.shape
                 # lrtb = normal_utils.get_padding(orig_H, orig_W)
                 # img, intrins = normal_utils.pad_input(img, intrins, lrtb)
-
-                # forward pass
-                # pred_list = model(img, intrins=intrins, mode='test')
-                # norm_out = pred_list[-1] # [1, 3, h, w]
-                if args.task_name[0] == 'normal':
-                    if eval_mode == "load_prediction":
-                        # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
-                        pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta[0]}_norm.png')
-                        norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
-                        norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
-                        norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-
-                    elif eval_mode == "generate_prediction":
-                        # resize to processing_res
-                        # if processing_res is not None:
-                        #     input_size = img.shape
-                        #     img =  resize_max_res(
-                        #     img, max_edge_resolution=processing_res,
-                        #     # resample_method=resample_method,
-                        #     )
-                        # norm_out = gen_prediction(img, pipeline) # [1, 3, h, w]
-                        if 'rgb2x' in model_alias:
-                            img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
-                            norm_out = pred_ret[list(prompts_ret.keys()).index('normal')][0] # PIL
-                            norm_out = (np.asarray(norm_out).astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3]), [-1,1]
+                
+                # also evaluate the image pairs
+                img_pairs = [img[0]]
+                img_pairs += [parallel_img.to(distributed_state.device) for parallel_img in data_dict['parallel_value'][0]]
+                
+                mosaics = []
+                for pidx, img in enumerate(img_pairs):
+                    # forward pass
+                    # pred_list = model(img, intrins=intrins, mode='test')
+                    # norm_out = pred_list[-1] # [1, 3, h, w]
+                    if args.task_name[0] == 'normal':
+                        if eval_mode == "load_prediction":
+                            # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
+                            pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta[0]}_norm.png')
+                            norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
+                            norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
                             norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-                        elif 'lotus' in model_alias:
-                            norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
-                        elif 'dsine' in model_alias:
-                            # Use the model to infer the normal map from the input image
-                            with torch.inference_mode():
-                                normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W), [-1,1]
-                            norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
 
-                        # resize to original res
-                        # if processing_res is not None:
-                        #     norm_out = resize(norm_out, input_size[-2:], antialias=True, )
+                        elif eval_mode == "generate_prediction":
+                            # resize to processing_res
+                            # if processing_res is not None:
+                            #     input_size = img.shape
+                            #     img =  resize_max_res(
+                            #     img, max_edge_resolution=processing_res,
+                            #     # resample_method=resample_method,
+                            #     )
+                            # norm_out = gen_prediction(img, pipeline) # [1, 3, h, w]
+                            if 'rgb2x' in model_alias:
+                                # img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
+                                img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img) # call rgb2x
+                                norm_out = pred_ret[list(prompts_ret.keys()).index('normal')][0] # PIL
+                                norm_out = (np.asarray(norm_out).astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3]), [-1,1]
+                                norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                            elif 'lotus' in model_alias:
+                                norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
+                            elif 'dsine' in model_alias:
+                                # Use the model to infer the normal map from the input image
+                                with torch.inference_mode():
+                                    normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W), [-1,1]
+                                norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
 
-                    # crop the padded part
-                    # norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
+                            # resize to original res
+                            # if processing_res is not None:
+                            #     norm_out = resize(norm_out, input_size[-2:], antialias=True, )
 
-                    pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
-                    pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
-                    #↑↑↑↑
+                        # crop the padded part
+                        # norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
 
-                    if 'normal_w2c_value' in data_dict.keys():
-                        gt_norm = data_dict['normal_w2c_value'].to(distributed_state.device)
-                        gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
+                        pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
+                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+                        #↑↑↑↑
 
-                        # gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
-                        # gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
-                        
-                        pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
-                        if total_normal_errors is None:
-                            total_normal_errors = pred_error[gt_norm_mask]
-                            # total_normal_errors = pred_error
-                        else:
-                            total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_norm_mask]), dim=0)
-                            # total_normal_errors = torch.cat((total_normal_errors, pred_error), dim=0)
+                        if 'normal_w2c_value' in data_dict.keys():
+                            gt_norm = data_dict['normal_w2c_value'].to(distributed_state.device)
+                            gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
 
-                    if results_dir is not None:
-                        if 'i' in img_meta:
-                            prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                        else:
-                            prefixs = [f'{o}_cam{c}_l{l}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
-                        vis_utils.visualize_normal(results_dir, prefixs, img, pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
-                
-                
-                elif args.task_name[0] == 'albedo':
+                            # gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                            # gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
+                            
+                            pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
+                            if total_normal_errors is None:
+                                total_normal_errors = pred_error[gt_norm_mask]
+                                # total_normal_errors = pred_error
+                            else:
+                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_norm_mask]), dim=0)
+                                # total_normal_errors = torch.cat((total_normal_errors, pred_error), dim=0)
+
+                        if results_dir is not None:
+                            if 'i' in img_meta:
+                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                            else:
+                                prefixs = [f'{o}_cam{c}_l{l}' + '' if not pidx else f'_aug{pidx}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
+                            mosaic = vis_utils.visualize_normal(results_dir, prefixs, img[None,...], pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
+                            mosaics.append(mosaic)
                     
-                    if eval_mode == "generate_prediction":
-                        if 'rgb2x' in model_alias:
-                            img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
-                            albedo_out = pred_ret[list(prompts_ret.keys()).index('albedo')][0] # PIL
-                            albedo_out = (np.asarray(albedo_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
-                            albedo_out = torch.tensor(albedo_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                    elif args.task_name[0] == 'albedo':
+                        
+                        if eval_mode == "generate_prediction":
+                            if 'rgb2x' in model_alias:
+                                # img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
+                                img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img) # call rgb2x via img, for jpg input, results input checked the same
+                                albedo_out = pred_ret[list(prompts_ret.keys()).index('albedo')][0] # PIL
+                                albedo_out = (np.asarray(albedo_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                                albedo_out = torch.tensor(albedo_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
 
-                    pred_albedo, pred_kappa = albedo_out[:, :3, :, :], albedo_out[:, 3:, :, :]
-                    pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
-                    #↑↑↑↑
+                        pred_albedo, pred_kappa = albedo_out[:, :3, :, :], albedo_out[:, 3:, :, :]
+                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+                        #↑↑↑↑
 
-                    if 'albedo_value' in data_dict.keys():
-                        gt_albedo = data_dict['albedo_value'].to(distributed_state.device)
-                        gt_albedo_mask = data_dict['albedo_mask'].to(distributed_state.device) if 'albedo_mask' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
+                        if 'albedo_value' in data_dict.keys():
+                            gt_albedo = data_dict['albedo_value'].to(distributed_state.device)
+                            gt_albedo_mask = data_dict['albedo_mask'].to(distributed_state.device) if 'albedo_mask' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
 
-                        pred_error = normal_utils.compute_normal_error(pred_albedo, gt_albedo)
-                        if total_normal_errors is None:
-                            total_normal_errors = pred_error[gt_albedo_mask]
-                        else:
-                            total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_albedo_mask]), dim=0)
+                            pred_error = normal_utils.compute_normal_error(pred_albedo, gt_albedo)
+                            if total_normal_errors is None:
+                                total_normal_errors = pred_error[gt_albedo_mask]
+                            else:
+                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_albedo_mask]), dim=0)
 
-                    if results_dir is not None:
-                        if 'i' in img_meta:
-                            prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                        else:
-                            prefixs = [f'{o}_cam{c}_l{l}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
-                        vis_utils.visualize_albedo(results_dir, prefixs, img, pred_albedo, pred_kappa, gt_albedo, gt_albedo_mask, pred_error)
+                        if results_dir is not None:
+                            if 'i' in img_meta:
+                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                            else:
+                                prefixs = [f'{o}_cam{c}_l{l}' + ('_noaug' if not pidx else f'_aug{pidx}') for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
+                            mosaic = vis_utils.visualize_albedo(results_dir, prefixs, img[None,...], pred_albedo, pred_kappa, gt_albedo, gt_albedo_mask, pred_error)
+                            mosaics.append(mosaic)
+                            
+                # concatnate mosaics
+                if len(mosaics) > 0:
+                    mosaics = np.concatenate(mosaics, axis=0)  # (H*3, W, 3)
+                    target_path = '%s/%s.png' % (results_dir, f'{img_meta["obj"][0]}_cam{img_meta["cam"][0]}_l{img_meta["l"][0]}_all')
+                    plt.imsave(target_path, mosaics)
+                            
         metrics = None
         if total_normal_errors is not None:
             metrics = normal_utils.compute_normal_metrics(total_normal_errors)
