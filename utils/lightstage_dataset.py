@@ -66,8 +66,8 @@ class LightstageDataset(Dataset):
                 n_paral = len(paral_img_path)
                 
                 if n_cross == 350 and n_paral == 350:
-                    for l in range(350):
-                    # for l in range(10): # debug
+                    # for l in range(350):
+                    for l in range(10): # debug
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':
@@ -239,6 +239,7 @@ class LightstageDataset(Dataset):
                 parallel_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
                 cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(cross_path)
                 parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
+                assert type(cross_path) == list and type(cross_path[0]) == str, f'cross_path should be a list of strings, got {type(cross_path)}'
             elif self.lighting_augmentation == 'random16':
                 random_lights = np.random.choice(self.omega_i_world.shape[0], 16, replace=False)
                 random_lights = [int(x) + 2 for x in random_lights]
@@ -572,6 +573,12 @@ class LightstageDataset(Dataset):
         sigma = sigma.clip(0, 1) / 10. # the decomposition used 10 as a clipping factor
         mask = mask.clip(0, 1)
         
+        # [0,1] to [-1,1]
+        static = (static - 0.5) * 2.0
+        cross = (cross - 0.5) * 2.0
+        parallel = (parallel - 0.5) * 2.0
+        albedo = (albedo - 0.5) * 2.0
+
         # remove nan and inf values
         static = np.nan_to_num(static)
         cross = np.nan_to_num(cross)

@@ -442,10 +442,12 @@ def evaluation_material(
                 img_pairs += [parallel_img.to(distributed_state.device) for parallel_img in data_dict['parallel_value'][0]]
                 
                 mosaics = []
-                for pidx, img in enumerate(img_pairs):
+                for pidx, img_ in enumerate(img_pairs):
                     # forward pass
                     # pred_list = model(img, intrins=intrins, mode='test')
                     # norm_out = pred_list[-1] # [1, 3, h, w]
+                    img = (img_ * 0.5 + 0.5).clamp(0, 1) # img_ is in [-1,1]
+
                     if args.task_name[0] == 'normal':
                         if eval_mode == "load_prediction":
                             # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
@@ -526,7 +528,7 @@ def evaluation_material(
                         #↑↑↑↑
 
                         if 'albedo_value' in data_dict.keys():
-                            gt_albedo = data_dict['albedo_value'].to(distributed_state.device)
+                            gt_albedo = (data_dict['albedo_value'].to(distributed_state.device) + 1.0) / 2.0 # albedo_value is scaled to [-1,1] in dataloader, recover here
                             gt_albedo_mask = data_dict['albedo_mask'].to(distributed_state.device) if 'albedo_mask' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
 
                             pred_error = normal_utils.compute_normal_error(pred_albedo, gt_albedo)

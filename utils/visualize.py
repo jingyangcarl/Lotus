@@ -72,7 +72,7 @@ def albedo_to_rgb(albedo, albedo_mask=None):
         albedo = tensor_to_numpy(albedo)
         albedo_mask = tensor_to_numpy(albedo_mask)
 
-    albedo_rgb = (albedo * 255).astype(np.uint8)
+    albedo_rgb = ((albedo + 1) * 0.5 * 255).astype(np.uint8)
     if albedo_mask is not None:
         albedo_rgb = albedo_rgb * albedo_mask     # (B, H, W, 3)
     return albedo_rgb
@@ -177,7 +177,7 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
             plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')
                 
         # img, albedo, gt, error
-        all_imgs = [img_/255., pred_albedo[i, ...], gt_albedo[i, ...], plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        all_imgs = [img[i,...]/255., pred_albedo[i, ...], gt_albedo[i, ...], plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
         all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
         target_path = '%s/%s.png' % (target_dir, prefixs[i])
         plt.imsave(target_path, all_imgs)
