@@ -66,8 +66,8 @@ class LightstageDataset(Dataset):
                 n_paral = len(paral_img_path)
                 
                 if n_cross == 350 and n_paral == 350:
-                    # for l in range(350):
-                    for l in range(10): # debug
+                    for l in range(350):
+                    # for l in range(10): # debug
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':
@@ -81,9 +81,11 @@ class LightstageDataset(Dataset):
                             row_ = row.copy()
                             row_['aug'] = False
                             metadata_.append(row_)
+                            metadata_.append(row_) # double the samples to keep the same number of samples as 1:1
                         elif self.original_augmentation_ratio == '0:1':
                             row_ = row.copy()
                             row_['aug'] = True
+                            metadata_.append(row_)
                             metadata_.append(row_)
                         else:
                             raise NotImplementedError(f'Original augmentation ratio {ori_aug_ratio} is not supported')
@@ -233,13 +235,16 @@ class LightstageDataset(Dataset):
                 cross_rgb_weights = [(1.0, 1.0, 1.0)]
                 parallel_rgb_weights = [(1.0, 1.0, 1.0)]
             elif self.lighting_augmentation == 'random8':
-                random_lights = np.random.choice(self.omega_i_world.shape[0], 8, replace=False)
-                random_lights = [int(x) + 2 for x in random_lights]
-                cross_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
-                parallel_path = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights]
-                cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(cross_path)
-                parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path)
-                assert type(cross_path) == list and type(cross_path[0]) == str, f'cross_path should be a list of strings, got {type(cross_path)}'
+                cross_path = []
+                parallel_path = []
+                for i in range(self.lighting_augmentation_pair_n):
+                    random_lights = np.random.choice(self.omega_i_world.shape[0], 8, replace=False)
+                    random_lights = [int(x) + 2 for x in random_lights]
+                    cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in random_lights])
+                    parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in random_lights])
+                    cross_rgb_weights = [(1.0, 1.0, 1.0)] * len(cross_path[-1]) # TODO: fix lighting weights
+                    parallel_rgb_weights = [(1.0, 1.0, 1.0)] * len(parallel_path[-1])
+                assert type(cross_path) == list and type(cross_path[0]) == list and type(cross_path[0][0] == str), f'cross_path should be a list of strings, got {type(cross_path)}'
             elif self.lighting_augmentation == 'random16':
                 random_lights = np.random.choice(self.omega_i_world.shape[0], 16, replace=False)
                 random_lights = [int(x) + 2 for x in random_lights]

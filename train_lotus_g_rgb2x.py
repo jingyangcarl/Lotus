@@ -124,22 +124,16 @@ def rgb2x(
         photo = img_rgb.to(accelerator.device)
 
     # Check if the width and height are multiples of 8. If not, crop it using torchvision.transforms.CenterCrop
-    old_height = photo.shape[1]
-    old_width = photo.shape[2]
-    new_height = old_height
-    new_width = old_width
+    old_height, old_width = photo.shape[1], photo.shape[2]
+    new_height, new_width = old_height, old_width
     radio = old_height / old_width
     max_side = 1000
     if old_height > old_width:
-        new_height = max_side
-        new_width = int(new_height / radio)
+        new_height, new_width = max_side, int(max_side / radio)
     else:
-        new_width = max_side
-        new_height = int(new_width * radio)
-
+        new_width, new_height = max_side, int(max_side * radio)
     if new_width % 8 != 0 or new_height % 8 != 0:
-        new_width = new_width // 8 * 8
-        new_height = new_height // 8 * 8
+        new_width, new_height = new_width // 8 * 8, new_height // 8 * 8
 
     photo = torchvision.transforms.Resize((new_height, new_width))(photo)
 
@@ -175,6 +169,117 @@ def rgb2x(
 
     return photo, return_list, prompts
 
+
+def x2rgb(
+    rgb_path, # only for visual
+    albedo_path,
+    normal_path,
+    roughness_path,
+    metallic_path,
+    irradiance_path,
+    prompt,
+    pipeline,
+    accelerator,
+    generator,
+    inference_step = 50,
+    num_samples = 1,
+    img_rgb = None,
+    img_albedo = None,
+    img_normal = None,
+    img_roughness = None,
+    img_metallic = None,
+    img_irradiance = None,
+):
+    if img_rgb is None:
+        rgb_image = load_image(rgb_path).to(accelerator.device)
+    else:
+        rgb_image = img_rgb.to(accelerator.device)
+
+    if img_albedo is None:
+        albedo_image = load_image(albedo_path).to(accelerator.device)
+    else:
+        albedo_image = img_albedo.to(accelerator.device)
+
+    if img_normal is None:
+        normal_image = load_image(normal_path).to(accelerator.device)
+    else:
+        normal_image = img_normal.to(accelerator.device)
+
+    if img_roughness is None:
+        roughness_image = load_image(roughness_path).to(accelerator.device)
+    else:
+        roughness_image = img_roughness.to(accelerator.device)
+
+    if img_metallic is None:
+        metallic_image = load_image(metallic_path).to(accelerator.device)
+    else:
+        metallic_image = img_metallic.to(accelerator.device)
+
+    if img_irradiance is None:
+        irradiance_image = load_image(irradiance_path).to(accelerator.device)
+    else:
+        irradiance_image = img_irradiance.to(accelerator.device)
+
+    # Set default height and width
+    old_height, old_width = albedo_image.shape[1], albedo_image.shape[2]
+    new_height, new_width = old_height, old_width
+    radio = old_height / old_width
+    max_side = 1000
+    if old_height > old_width:
+        new_height, new_width = max_side, int(max_side / radio)
+    else:
+        new_width, new_height = max_side, int(max_side * radio)
+    if new_width % 8 != 0 or new_height % 8 != 0:
+        new_width, new_height = new_width // 8 * 8, new_height // 8 * 8
+
+    albedo_image = torchvision.transforms.Resize((new_height, new_width))(albedo_image)
+    normal_image = torchvision.transforms.Resize((new_height, new_width))(normal_image)
+    roughness_image = torchvision.transforms.Resize((new_height, new_width))(roughness_image)
+    metallic_image = torchvision.transforms.Resize((new_height, new_width))(metallic_image)
+    irradiance_image = torchvision.transforms.Resize((new_height, new_width))(irradiance_image)
+
+    # Check if any of the input images are not None
+    # and set the height and width accordingly
+    gbuffer = [
+        rgb_image,
+        albedo_image,
+        normal_image,
+        roughness_image,
+        metallic_image,
+        irradiance_image,
+    ]
+
+    required_aovs = ["albedo", "normal", "roughness", "metallic", "irradiance"]
+    return_list = []
+    prompts = []
+    # TODO: may need to update to support OLAT
+    for i in range(num_samples):
+        generated_image = pipeline(
+            prompt='',
+            albedo=albedo_image,
+            normal=normal_image,
+            roughness=roughness_image,
+            metallic=metallic_image,
+            irradiance=irradiance_image,
+            num_inference_steps=inference_step,
+            height=new_height,
+            width=new_width,
+            generator=generator,
+            required_aovs=required_aovs,
+            guidance_rescale=0.7,
+            # output_type="np",
+        ).images[0]
+        
+        generated_image = torchvision.transforms.Resize(
+            (old_height, old_width)
+        )(generated_image)
+
+        generated_image = (generated_image, f"Generated Image {i}")
+        return_list.append(generated_image)
+        prompts.append(f"static") # TODO: olat_1, etc.
+
+    return gbuffer, return_list, prompts
+
 def run_rgb2x_example_validation(
     pipeline,
     task,
@@ -197,7 +302,7 @@ def run_rgb2x_example_validation(
     # distributed inference
     distributed_state = PartialState()
     pipeline.to(distributed_state.device)
-    
+
     with distributed_state.split_between_processes(validation_images) as validation_batch:
         for i in tqdm(range(len(validation_batch)), desc=f"rgb2x quick_eval on {distributed_state.device}"):
             photo, preds, prompts = rgb2x(
@@ -213,12 +318,82 @@ def run_rgb2x_example_validation(
             for j, (pred, prompt) in enumerate(zip(preds, prompts)):
                 pred_annos.append(pred[0])
                         
-                normal_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
-                os.makedirs(os.path.dirname(normal_outpath), exist_ok=True)
-                pred[0].save(normal_outpath)
+                pred_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
+                os.makedirs(os.path.dirname(pred_outpath), exist_ok=True)
+                pred[0].save(pred_outpath)
             
             # tensor to PIL and convert to RGB
             # photo = (photo * 0.5 + 0.5).clamp(0, 1)
+            photo = (photo * 255).to(torch.uint8)
+            photo = photo.permute(1, 2, 0).cpu().numpy()
+            photo = Image.fromarray(photo)
+            photo = photo.resize((pred[0].size), Image.LANCZOS)
+            input_images.append(photo)
+
+    # gather distributed results
+    input_images = gather_object(input_images)
+    pred_annos = gather_object(pred_annos)
+        
+    # based on tasks, split the pred_annos lists based on the number of tasks
+    # e.g. pred_annos = [depth1, normal1, depth2, normal2, depth3, normal3] -> [[depth1, depth2, depth3], [normal1, normal2, normal3]]
+    pred_annos = [pred_annos[i::len(prompts)] for i in range(len(prompts))]
+    
+    # Save output
+    save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
+    save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val')
+    os.makedirs(save_dir, exist_ok=True)
+    save_output.save(os.path.join(save_dir, f'{model_alias}.jpg'))
+
+def run_x2rgb_example_validation(
+    pipeline,
+    task,
+    args,
+    step,
+    accelerator,
+    generator,
+    inference_step = 50,
+    num_samples = 1,
+    model_alias = 'model'
+):
+    
+    validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
+    validation_images = sorted(validation_images)
+    validation_images = validation_images[:args.validation_top_k] if args.validation_top_k > 0 else validation_images
+    
+    pred_annos = []
+    input_images = []
+
+    # distributed inference
+    distributed_state = PartialState()
+    pipeline.to(distributed_state.device)
+
+    with distributed_state.split_between_processes(validation_images) as validation_batch:
+        for i in tqdm(range(len(validation_batch)), desc=f"x2rgb quick_eval on {distributed_state.device}"):
+            rgb2x_save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val', model_alias.replace('x2rgb', 'rgb2x'))
+            gbuffer, preds, prompts = x2rgb(
+                validation_batch[i],
+                os.path.join(rgb2x_save_dir, f'{i:02d}_albedo.jpg'),
+                os.path.join(rgb2x_save_dir, f'{i:02d}_normal.jpg'),
+                os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
+                os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
+                os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
+                'static',
+                pipeline,
+                accelerator,
+                generator,
+                inference_step, 
+                num_samples
+            )
+
+            for j, (pred, prompt) in enumerate(zip(preds, prompts)):
+                pred_annos.append(pred[0])
+                        
+                pred_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
+                os.makedirs(os.path.dirname(pred_outpath), exist_ok=True)
+                pred[0].save(pred_outpath)
+            
+            # tensor to PIL and convert to RGB
+            photo = gbuffer[0] # rgb image
             photo = (photo * 255).to(torch.uint8)
             photo = photo.permute(1, 2, 0).cpu().numpy()
             photo = Image.fromarray(photo)
@@ -552,7 +727,7 @@ def run_evaluation(pipeline, task, args, step, accelerator):
         else:
                 raise ValueError(f"Not Supported Task: {task}!")
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=10):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=10, unet_fr=None):
     logger.info("Running validation for task: %s... " % args.task_name[0])
     task = args.task_name[0]
 
@@ -669,7 +844,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if args.enable_xformers_memory_efficient_attention:
             pipeline_rgb2x.enable_xformers_memory_efficient_attention()
             
-        # photo_path = '/home/jyang/projects/ObjectReal/external/lotus/datasets/quick_validation/00.png'
+        # Run example-validation
         run_rgb2x_example_validation(pipeline_rgb2x, task, args, step, accelerator, generator, model_alias=model_alias)
 
         if enable_eval:
@@ -678,6 +853,65 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             pass
 
         del pipeline_rgb2x
+
+        if reload_pretrained_unet:
+            unet = unet_save
+        elif disable_lora_on_reference:
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.enable_adapters()
+            else:
+                unet.enable_adapters()
+        else:
+            pass
+        
+    def wrap_pipeline_x2rgb(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
+
+        if reload_pretrained_unet:
+            # reloading unet to preserver the pretrained results
+            unet_save = unet
+            unet = UNet2DConditionModel.from_pretrained(
+                pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
+                low_cpu_mem_usage=False, device_map=None,
+            ).to(accelerator.device, weight_dtype)
+        elif disable_lora_on_reference:
+            # when not reloading, check if need to disable lora adapters
+            if isinstance(unet, nn.parallel.DistributedDataParallel):
+                unet.module.disable_adapters() # multi-gpu
+            else:
+                unet.disable_adapters() # single gpu
+        else:
+            # use the finetuned unet
+            pass
+
+        pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
+            pretrained_model_name_or_path,
+            vae=accelerator.unwrap_model(vae),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+            tokenizer=tokenizer,
+            unet=accelerator.unwrap_model(unet),
+            safety_checker=None,
+            revision=args.revision,
+            variant=args.variant,
+            torch_dtype=weight_dtype,
+        )
+        pipeline_x2rgb.scheduler = DDIMScheduler.from_config(
+            pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+        )
+        pipeline_x2rgb.to(accelerator.device)
+        pipeline_x2rgb.set_progress_bar_config(disable=True)
+        
+        if args.enable_xformers_memory_efficient_attention:
+            pipeline_x2rgb.enable_xformers_memory_efficient_attention()
+            
+        # Run example-validation
+        run_x2rgb_example_validation(pipeline_x2rgb, task, args, step, accelerator, generator, model_alias=model_alias)
+
+        if enable_eval:
+            # Note that, the results may different from the example_validation when evaluation loads exr images.
+            # run_brdf_evaluation(pipeline_x2rgb, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            pass
+
+        del pipeline_x2rgb
 
         if reload_pretrained_unet:
             unet = unet_save
@@ -712,9 +946,12 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         assert args.task_name[0] in ['albedo', 'normal'], f"{args.pretrained_model_name_or_path} pipeline support albedo and normal estimation task."
         if args.use_lora:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
+            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
+            
             # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
         else:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
+            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
 
     # generate pretrained results
     if step == 0:
@@ -1656,6 +1893,7 @@ def main():
         #     weight_dtype,
         #     global_step,
         #     eval_first_n=args.evaluation_top_k,
+        #     unet_fr=(unet_fr if 'unet_fr' in locals() else None)
         # )
         pass
             
@@ -1966,7 +2204,7 @@ def main():
                                     latent_hw = model_pred_.shape[-2:]
                                     model_pred_ = vae.decode((model_pred_.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
                                     model_pred_ = F.interpolate(model_pred_, size=latent_hw, mode='bilinear', align_corners=False)
-                                    model_pred_ = model_pred_.float().clamp(0,1)
+                                    model_pred_ = model_pred_.float() # should stays in [-1,1]
                                 
                                 task_latents.append(model_pred_)
                             
@@ -2105,7 +2343,7 @@ def main():
                             
                             if 'unet_fr' in locals() and global_step >= args.forward_rendering_warmup_steps:
                                 pred_decode = vae.decode((model_pred_fr[:bsz][i][None,...].float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
-                                img = pred_decode[0].float().clamp(0,1).detach().cpu().numpy().transpose(1, 2, 0)
+                                img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
                                 img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                                 img = Image.fromarray((img * 255).astype(np.uint8))
                                 img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_fr_pred.png"))
@@ -2124,6 +2362,7 @@ def main():
                         weight_dtype,
                         global_step,
                         eval_first_n=args.evaluation_top_k,
+                        unet_fr=(unet_fr if 'unet_fr' in locals() else None)
                     )
                     pass
 

@@ -34,15 +34,15 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=5
 
 # model configs
 export TIMESTEP=999
 export TASK_NAME="albedo"
 
 # data augmentatoin
-export AUG_RATIO="1:1"
-export AUG_TYPE="random8"
+export AUG_RATIO="1:0"
+export AUG_TYPE="-random8"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -50,9 +50,10 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
+export FORWARD_RENDERING_WARMUP_STEPS=1000
 
 # output dir
-export OUTPUT_DIR="output/albedo/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_singlegpu_lightstage_aug1-1_+random8"
+export OUTPUT_DIR="output/relighting/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_FR_warmup${FORWARD_RENDERING_WARMUP_STEPS}_check_albedo_fixiradiance_fixvaldecode_disableaug_allobj"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -67,6 +68,8 @@ accelerate launch --mixed_precision="fp16" \
   --prob_lightstage=$P_LIGHTSTAGE \
   --lightstage_lighting_augmentation=$AUG_TYPE \
   --lightstage_original_augmentation_ratio=$AUG_RATIO \
+  --lightstage_lighting_augmentation_pair_n=2 \
+  --lightstage_augmentation_pair_loss_enable \
   --mix_dataset \
   --random_flip \
   --align_cam_normal \
@@ -92,4 +95,5 @@ accelerate launch --mixed_precision="fp16" \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
   --use_lora \
+  --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
   --save_pred_vis
