@@ -66,8 +66,8 @@ class LightstageDataset(Dataset):
                 n_paral = len(paral_img_path)
                 
                 if n_cross == 350 and n_paral == 350:
-                    for l in range(350):
-                    # for l in range(10): # debug
+                    # for l in range(350):
+                    for l in range(10): # debug
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':

@@ -266,7 +266,7 @@ def x2rgb(
             width=new_width,
             generator=generator,
             required_aovs=required_aovs,
-            guidance_rescale=0.7,
+            # guidance_rescale=0.7,
             # output_type="np",
         ).images[0]
         
@@ -824,35 +824,41 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             # use the finetuned unet
             pass
 
-        pipeline_rgb2x = StableDiffusionAOVMatEstPipeline.from_pretrained(
-            pretrained_model_name_or_path,
-            vae=accelerator.unwrap_model(vae),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-            tokenizer=tokenizer,
-            unet=accelerator.unwrap_model(unet),
-            safety_checker=None,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        pipeline_rgb2x.scheduler = DDIMScheduler.from_config(
-            pipeline_rgb2x.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
-        )
-        pipeline_rgb2x.to(accelerator.device)
-        pipeline_rgb2x.set_progress_bar_config(disable=True)
+        if unet is not None:
+            pipeline = StableDiffusionAOVMatEstPipeline.from_pretrained(
+                pretrained_model_name_or_path,
+                vae=accelerator.unwrap_model(vae),
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                tokenizer=tokenizer,
+                unet=accelerator.unwrap_model(unet),
+                safety_checker=None,
+                revision=args.revision,
+                variant=args.variant,
+                torch_dtype=weight_dtype,
+            )
+            pipeline.scheduler = DDIMScheduler.from_config(
+                pipeline.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+            )
+        else:
+            # for rgb2albedo only model, no unet is provided
+            # TODO: this function is not compatible with reload_pretrained_unet and disable_lora_on_reference
+            pipeline = StableDiffusionAOVMatEstPipeline.from_pretrained('zheng95z/rgb-to-x')
+            pipeline.load_lora_weights(pretrained_model_name_or_path)
+        pipeline.to(accelerator.device)
+        pipeline.set_progress_bar_config(disable=True)
         
         if args.enable_xformers_memory_efficient_attention:
-            pipeline_rgb2x.enable_xformers_memory_efficient_attention()
+            pipeline.enable_xformers_memory_efficient_attention()
             
         # Run example-validation
-        run_rgb2x_example_validation(pipeline_rgb2x, task, args, step, accelerator, generator, model_alias=model_alias)
+        run_rgb2x_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
 
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
-            run_brdf_evaluation(pipeline_rgb2x, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            # run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
             pass
 
-        del pipeline_rgb2x
+        del pipeline
 
         if reload_pretrained_unet:
             unet = unet_save
@@ -883,7 +889,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             # use the finetuned unet
             pass
 
-        pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
+        pipeline = StableDiffusionAOVDropoutPipeline.from_pretrained(
             pretrained_model_name_or_path,
             vae=accelerator.unwrap_model(vae),
             text_encoder=accelerator.unwrap_model(text_encoder),
@@ -894,24 +900,24 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             variant=args.variant,
             torch_dtype=weight_dtype,
         )
-        pipeline_x2rgb.scheduler = DDIMScheduler.from_config(
-            pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+        pipeline.scheduler = DDIMScheduler.from_config(
+            pipeline.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
         )
-        pipeline_x2rgb.to(accelerator.device)
-        pipeline_x2rgb.set_progress_bar_config(disable=True)
+        pipeline.to(accelerator.device)
+        pipeline.set_progress_bar_config(disable=True)
         
         if args.enable_xformers_memory_efficient_attention:
-            pipeline_x2rgb.enable_xformers_memory_efficient_attention()
+            pipeline.enable_xformers_memory_efficient_attention()
             
         # Run example-validation
-        run_x2rgb_example_validation(pipeline_x2rgb, task, args, step, accelerator, generator, model_alias=model_alias)
+        run_x2rgb_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
 
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
             # run_brdf_evaluation(pipeline_x2rgb, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
             pass
 
-        del pipeline_x2rgb
+        del pipeline
 
         if reload_pretrained_unet:
             unet = unet_save
@@ -933,7 +939,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if enable_eval:
             run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
-    enable_eval = True
+    enable_eval = False
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
         assert args.task_name[0] in ['normal', 'depth'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
         if args.use_lora:
@@ -946,12 +952,21 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         assert args.task_name[0] in ['albedo', 'normal'], f"{args.pretrained_model_name_or_path} pipeline support albedo and normal estimation task."
         if args.use_lora:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
-            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
-            
+            if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
             # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
         else:
             wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
-            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
+            if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
+
+    elif 'zheng95z/x-to-rgb' in args.pretrained_model_name_or_path:
+        assert args.task_name[0] in ['forward'], f"{args.pretrained_model_name_or_path} pipeline support forward rendering task."
+        if args.use_lora:
+            wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+        else:
+            wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     # generate pretrained results
     if step == 0:
@@ -1331,7 +1346,7 @@ def parse_args():
         "--forward_rendering_warmup_steps",
         type=int,
         default=0,
-        help="Number of steps to warmup the rendering loss.",
+        help="Number of steps to warmup the rendering loss. When set larger than total training steps, the rendering loss will be disabled.",
     )
 
     args = parser.parse_args()
@@ -1492,12 +1507,27 @@ def main():
         )
         
         # include x2rgb
-        unet_fr = UNet2DConditionModel.from_pretrained(
-            args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'), subfolder="unet", revision=args.revision, variant=args.variant,
+        if args.forward_rendering_warmup_steps < args.max_train_steps:
+            unet_fr = UNet2DConditionModel.from_pretrained(
+                args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'), subfolder="unet", revision=args.revision, variant=args.variant,
+                low_cpu_mem_usage=False, device_map=None,
+            )
+            pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
+                args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'),
+            )
+            noise_scheduler_fr = DDIMScheduler.from_config(
+                pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+            )
+    elif 'x-to-rgb' in args.pretrained_model_name_or_path:
+        unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
             low_cpu_mem_usage=False, device_map=None,
         )
         pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
-            args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'),
+            args.pretrained_model_name_or_path,
+        )
+        noise_scheduler = DDIMScheduler.from_config(
+            pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
         )
         
     elif 'diffusion_renderer' in args.pretrained_model_name_or_path:
@@ -1533,7 +1563,7 @@ def main():
         lora_layers = filter(lambda p: p.requires_grad, unet.parameters())
         
         # also add LoRA to unet_fr if exists
-        if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+        if 'unet_fr' in locals():
             unet_fr_lora_config = LoraConfig(
                 r=lora_rank,
                 lora_alpha=lora_rank,
@@ -1548,7 +1578,7 @@ def main():
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.train()
-    if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+    if 'unet_fr' in locals():
         unet_fr.train()
 
     if args.enable_xformers_memory_efficient_attention:
@@ -1561,8 +1591,8 @@ def main():
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
-            
-            if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+
+            if 'unet_fr' in locals():
                 unet_fr.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
@@ -1573,29 +1603,127 @@ def main():
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
                 for i, model in enumerate(models):
-                    model.save_pretrained(os.path.join(output_dir, "unet"))
+                    # Determine the model name based on the index and available models
+                    model_name = "unet" if i == 0 else f"unet_fr"
+                    
+                    if args.use_lora:
+                        # For LoRA models, save the complete model state (base + LoRA weights merged)
+                        # This way we can load it back directly
+                        try:
+                            model.save_pretrained(os.path.join(output_dir, model_name))
+                            accelerator.print(f"Successfully saved {model_name} with LoRA to {os.path.join(output_dir, model_name)}")
+                        except Exception as e:
+                            accelerator.print(f"Warning: Failed to save {model_name} with LoRA: {e}")
+                    else:
+                        # For non-LoRA models, save normally  
+                        try:
+                            model.save_pretrained(os.path.join(output_dir, model_name))
+                            accelerator.print(f"Successfully saved {model_name} to {os.path.join(output_dir, model_name)}")
+                        except Exception as e:
+                            accelerator.print(f"Warning: Failed to save {model_name}: {e}")
 
                     # make sure to pop weight so that corresponding model is not saved again
                     weights.pop()
 
         def load_model_hook(models, input_dir):
-            for _ in range(len(models)):
+            for i in range(len(models)):
                 # pop models so that they are not loaded again
                 model = models.pop()
+                
+                # Determine the model name based on the index and available models
+                model_name = "unet" if i == 0 else f"unet_fr"
 
                 # load diffusers style into model
-                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet", in_channels=8)
-                model.register_to_config(**load_model.config)
-
-                model.load_state_dict(load_model.state_dict())
-                del load_model
+                if args.use_lora:
+                    # For LoRA models, we need to load the checkpoint directly into the current model
+                    # since the model already has LoRA adapters added
+                    checkpoint_path = os.path.join(input_dir, model_name)
+                    
+                    # First try to load as a regular checkpoint (contains both base + LoRA weights)
+                    try:
+                        # Load the config
+                        from diffusers import UNet2DConditionModel
+                        import json
+                        
+                        config_path = os.path.join(checkpoint_path, "config.json")
+                        if os.path.exists(config_path):
+                            with open(config_path, 'r') as f:
+                                config = json.load(f)
+                            model.register_to_config(**config)
+                        
+                        # Load the weights directly - this should include LoRA weights
+                        from safetensors import safe_open
+                        import torch
+                        
+                        # Try loading from safetensors first
+                        weights_path = os.path.join(checkpoint_path, "diffusion_pytorch_model.safetensors")
+                        if not os.path.exists(weights_path):
+                            weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+                        
+                        if os.path.exists(weights_path):
+                            if weights_path.endswith('.safetensors'):
+                                state_dict = {}
+                                with safe_open(weights_path, framework="pt", device="cpu") as f:
+                                    for key in f.keys():
+                                        state_dict[key] = f.get_tensor(key)
+                            else:
+                                state_dict = torch.load(weights_path, map_location="cpu")
+                            
+                            # Load the state dict into the model (this includes LoRA weights)
+                            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                            
+                            if missing_keys:
+                                accelerator.print(f"Warning: Missing keys when loading {model_name}: {len(missing_keys)} keys")
+                            if unexpected_keys:
+                                accelerator.print(f"Warning: Unexpected keys when loading {model_name}: {len(unexpected_keys)} keys")
+                            
+                            accelerator.print(f"Successfully loaded {model_name} checkpoint with LoRA from {checkpoint_path}")
+                        else:
+                            accelerator.print(f"Warning: No weights file found for {model_name} at {checkpoint_path}")
+                            
+                    except Exception as e:
+                        accelerator.print(f"Warning: Failed to load {model_name} checkpoint: {e}")
+                        # Fallback to original loading approach
+                        try:
+                            original_in_channels = model.config.in_channels if hasattr(model.config, 'in_channels') else 4
+                            load_model = UNet2DConditionModel.from_pretrained(
+                                input_dir, 
+                                subfolder=model_name, 
+                                in_channels=original_in_channels,
+                                low_cpu_mem_usage=False, 
+                                device_map=None
+                            )
+                            model.register_to_config(**load_model.config)
+                            model.load_state_dict(load_model.state_dict(), strict=False)
+                            del load_model
+                        except Exception as fallback_e:
+                            accelerator.print(f"Error: Both checkpoint loading methods failed for {model_name}: {fallback_e}")
+                            
+                else:
+                    # For non-LoRA models, load normally
+                    try:
+                        original_in_channels = model.config.in_channels if hasattr(model.config, 'in_channels') else 4
+                        
+                        load_model = UNet2DConditionModel.from_pretrained(
+                            input_dir, 
+                            subfolder=model_name, 
+                            in_channels=original_in_channels,
+                            low_cpu_mem_usage=False, 
+                            device_map=None
+                        )
+                        model.register_to_config(**load_model.config)
+                        model.load_state_dict(load_model.state_dict())
+                        del load_model
+                        accelerator.print(f"Successfully loaded {model_name} checkpoint (non-LoRA)")
+                    except Exception as e:
+                        accelerator.print(f"Error: Failed to load {model_name} checkpoint: {e}")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-        if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+        if 'unet_fr' in locals():
             unet_fr.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -1630,7 +1758,7 @@ def main():
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
         )
-        if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+        if 'unet_fr' in locals():
             optimizer_fr = optimizer_cls(
                 lora_layers_fr,
                 lr=args.learning_rate,
@@ -1773,7 +1901,7 @@ def main():
         unet, optimizer, train_dataloader_hypersim, train_dataloader_vkitti, train_dataloader_lightstage, lr_scheduler
     )
     
-    if 'rgb-to-x' in args.pretrained_model_name_or_path or 'diffusion_renderer' in args.pretrained_model_name_or_path:
+    if 'unet_fr' in locals():
         unet_fr = accelerator.prepare(unet_fr)
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
@@ -1959,6 +2087,9 @@ def main():
                 elif args.task_name[0] == "albedo":
                     assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for albedo estimation'
                     TAR_ANNO = "albedo_values"
+                elif args.task_name[0] == "forward":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['x-to-rgb'], f'model {args.pretrained_model_name_or_path} not supported for forward rendering'
+                    TAR_ANNO = "pixel_values"
                 else:
                     raise ValueError(f"Do not support {args.task_name[0]} yet. ")
                 
@@ -1990,6 +2121,22 @@ def main():
                     rgb_latents = rgb_latents[:bsz_per_task] # [B, 4, h, w], use bsz_per_task here, since the batch sample can be smaller than args.train_batch_size
                     target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
                     bsz = rgb_latents.shape[0] # update bsz to the real batch size
+                    
+                elif 'x-to-rgb' in args.pretrained_model_name_or_path:
+                    bsz = target_latents.shape[0]
+                    num_tasks = 1
+                    bsz_per_task = int(bsz/(num_tasks+1))
+                    
+                    black_latents = torch.zeros_like(rgb_latents[:bsz_per_task])
+                    gbuffer_latents = vae.encode(
+                        torch.cat((batch["albedo_values"],batch["normal_values"]), dim=0).to(weight_dtype)
+                    ).latent_dist.sample() # [2B, 4, h, w]
+                    gbuffer_latents = gbuffer_latents * vae.config.scaling_factor
+                    gbuffer_latents = torch.cat((gbuffer_latents[:bsz_per_task], gbuffer_latents[:bsz_per_task], black_latents, black_latents, black_latents[:,:3]), dim=1) # [B, 15, h, w]
+                    target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
+                    bsz = black_latents.shape[0] # update bsz to the real batch size
+                else:
+                    raise ValueError(f"Do not support {args.pretrained_model_name_or_path} yet. ")
                     
 
                 # Get the valid mask for the latent space
@@ -2026,7 +2173,7 @@ def main():
                     # original single step
                     timesteps = torch.tensor([args.timestep], device=target_latents.device).repeat(bsz)
                     timesteps = timesteps.long()
-                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path or 'x-to-rgb' in args.pretrained_model_name_or_path:
                     # multiple timesteps
                     # TODO: https://github.com/prs-eth/Marigold/blob/b1dffaaa3f7a2fe406b3bb9dd3c358b30da66060/src/trainer/marigold_normals_trainer.py#L235
                     if args.seed is None:
@@ -2054,6 +2201,10 @@ def main():
                     unet_input = torch.cat(
                         [noisy_latents, rgb_latents], dim=1
                     ) # [B, 8, h, w]
+                elif 'x-to-rgb' in args.pretrained_model_name_or_path:
+                    unet_input = torch.cat(
+                        [noisy_latents, gbuffer_latents], dim=1
+                    ) # [B, 23, h, w]
 
                 # Get the empty text embedding for conditioning
                 # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
@@ -2066,16 +2217,16 @@ def main():
                         truncation=True,
                         return_tensors="pt",
                     )
-                elif 'rgb-to-x' in args.pretrained_model_name_or_path:
+                elif 'rgb-to-x' in args.pretrained_model_name_or_path or 'x-to-rgb' in args.pretrained_model_name_or_path:
                     # prompt = "Albedo (diffuse basecolor)"
                     if args.task_name[0] == "normal":
                         prompt = "Camera-space Normal" # checked, this is correct during the training
                     elif args.task_name[0] == "albedo":
                         prompt = "Albedo (diffuse basecolor)" # checked, this is correct during the training
+                    elif args.task_name[0] == "forward":
+                        prompt = ""
                     else:
                         raise ValueError(f"Do not support {args.task_name[0]} yet. ")
-                    # prompt = ""
-                    # from StableDiffusionAOVMatEstPipeline::_encode_prompt
                     text_inputs = tokenizer(
                         prompt,
                         padding="max_length",
@@ -2088,7 +2239,6 @@ def main():
                 encoder_hidden_states = encoder_hidden_states.repeat(bsz, 1, 1)
 
                 # Predict
-                # if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path:
                 if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
                     # Get the task embedding
                     task_emb_anno = torch.tensor([1, 0]).float().unsqueeze(0).to(accelerator.device)
@@ -2157,18 +2307,22 @@ def main():
                     alpha_t = _extract(torch.sqrt(alphas_cumprod), timesteps, unet_input.shape)
                     sigma_t = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps, unet_input.shape)
                     denom = alpha_t**2 + sigma_t**2
-                    x0_pred = (alpha_t * unet_input[:,:bsz_per_task] - sigma_t * model_pred) / denom  # [B,4,h,w]
+                    rgb_x0_pred = (alpha_t * unet_input[:,:bsz_per_task] - sigma_t * model_pred) / denom  # [B,4,h,w]
 
                     # Compute loss
                     anno_loss = F.mse_loss(model_pred[valid_mask_down_anno].float(), target[valid_mask_down_anno].float(), reduction="mean")
                     rgb_loss = torch.tensor(0.0).to(anno_loss.device) # no rgb loss in rgb2x
-                    rgb_pair_loss = F.mse_loss(x0_pred[:bsz_per_task][valid_mask_down_anno[:bsz_per_task]].float(), x0_pred[bsz_per_task:][valid_mask_down_anno[bsz_per_task:]].float(), reduction="mean") if args.lightstage_augmentation_pair_loss_enable else 0*anno_loss
+                    rgb_pair_loss = F.mse_loss(rgb_x0_pred[:bsz_per_task][valid_mask_down_anno[:bsz_per_task]].float(), rgb_x0_pred[bsz_per_task:][valid_mask_down_anno[bsz_per_task:]].float(), reduction="mean") if args.lightstage_augmentation_pair_loss_enable else 0*anno_loss
                     rendering_loss = torch.tensor(0.0).to(anno_loss.device)
                     loss = anno_loss + rgb_loss + rgb_pair_loss
                     
                     # forward renderer loss
                     if 'unet_fr' in locals() and global_step+1 >= args.forward_rendering_warmup_steps:
                         
+                        noise_fr = torch.randn_like(rgb_latents) # [B, 4, h, w]
+                        timesteps_fr = torch.randint(0, noise_scheduler_fr.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [B,]
+                        noisy_latents_fr = noise_scheduler_fr.add_noise(target_latents[:bsz], noise_fr, timesteps_fr)
+
                         # pass through the first stage unet_fr
                         with torch.no_grad():
                             prompts = {
@@ -2197,6 +2351,8 @@ def main():
                                 encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
                                 encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
                             
+                                # TODO: this cannot be used for trainning the forward right? as the output not the final prediction of different kinds
+                                # TODO: maybe we can use x0 status
                                 model_pred_ = unet(unet_input[:bsz], timesteps[:bsz], encoder_hidden_states_, return_dict=False)[0]
                                 
                                 if task == 'irradiance':
@@ -2208,7 +2364,7 @@ def main():
                                 
                                 task_latents.append(model_pred_)
                             
-                            unet_input_fr = torch.cat([noisy_latents] + task_latents, dim=1) # [B, 4*6, h, w]
+                            unet_fr_input = torch.cat([noisy_latents_fr] + task_latents, dim=1) # [B, 4*6, h, w]
                             
                         # forward rendering
                         text_inputs_ = tokenizer(
@@ -2221,10 +2377,27 @@ def main():
                         text_input_ids_ = text_inputs_.input_ids.to(target_latents.device)
                         encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
                         encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
-                        model_pred_fr = unet_fr(unet_input_fr, timesteps[:bsz], encoder_hidden_states_, return_dict=False)[0] # [B, 4, h, w]
-                        
-                        rendering_loss = F.mse_loss(model_pred_fr[valid_mask_down_anno[:bsz]].float(), rgb_latents[valid_mask_down_anno[:bsz]].float(), reduction="mean")
+                        model_fr_pred = unet_fr(unet_fr_input, timesteps_fr, encoder_hidden_states_, return_dict=False)[0] # [B, 4, h, w]
+
+                        assert noise_scheduler_fr.config.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
+                        # target_fr = noise_scheduler_fr.get_velocity(rgb_latents, noise_fr, timesteps_fr)
+                        target_fr = noise_scheduler_fr.get_velocity(target_latents[:bsz], noise_fr, timesteps_fr) #
+
+                        # rendering_loss = F.mse_loss(model_pred_fr[valid_mask_down_anno[:bsz]].float(), rgb_latents[valid_mask_down_anno[:bsz]].float(), reduction="mean")
+                        rendering_loss = F.mse_loss(model_fr_pred[valid_mask_down_anno[:bsz]].float(), target_fr[valid_mask_down_anno[:bsz]].float(), reduction="mean")
                         loss = loss + rendering_loss
+                        
+                elif 'x-to-rgb' in args.pretrained_model_name_or_path:
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [B, 4, h, w]
+                    
+                    assert noise_scheduler.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
+                    target = noise_scheduler.get_velocity(target_latents, noise, timesteps)
+                    
+                    anno_loss = F.mse_loss(model_pred[valid_mask_down_anno].float(), target[valid_mask_down_anno].float(), reduction="mean")
+                    rgb_loss = torch.tensor(0.0).to(anno_loss.device) # no rgb loss in x2rgb
+                    rgb_pair_loss = torch.tensor(0.0).to(target.device)
+                    rendering_loss = torch.tensor(0.0).to(target.device)
+                    loss = anno_loss + rgb_loss + rgb_pair_loss + rendering_loss
 
                 # Gather loss
                 avg_anno_loss = accelerator.gather(anno_loss.repeat(args.train_batch_size)).mean()
@@ -2245,11 +2418,11 @@ def main():
                 lr_scheduler.step()
                 optimizer.zero_grad()
             
-            logs = {"SL": loss.detach().item(), 
-                    "SL_A": anno_loss.detach().item(), 
-                    "SL_R": rgb_loss.detach().item(), 
-                    "SL_RP": rgb_pair_loss.detach().item(),
-                    "SL_FR": rendering_loss.detach().item(),
+            logs = {"L": loss.detach().item(), 
+                    "L_A": anno_loss.detach().item(), 
+                    "L_R": rgb_loss.detach().item(), 
+                    "L_RP": rgb_pair_loss.detach().item(),
+                    "L_FR": rendering_loss.detach().item(),
                     "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
         
@@ -2296,7 +2469,7 @@ def main():
                                     shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
+                        accelerator.save_state(save_path) # TODO: this will overwrite unet when unet_fr is enabled
                         logger.info(f"Saved state to {save_path}")
                         
                         if args.use_lora:
@@ -2310,43 +2483,77 @@ def main():
                                 unet_lora_layers=unet_lora_state_dict,
                                 safe_serialization=True,
                             )
+                            
+                            if 'unet_fr' in locals():
+                                unwrapped_unet_fr = unwrap_model(unet_fr)
+                                unet_fr_lora_state_dict = convert_state_dict_to_diffusers(
+                                    get_peft_model_state_dict(unwrapped_unet_fr, adapter_name='lora_lotus_fr')
+                                )
+                                
+                                LotusGPipeline.save_lora_weights(
+                                    save_directory=save_path,
+                                    unet_lora_layers=unet_fr_lora_state_dict,
+                                    safe_serialization=True,
+                                )
                 
                 if global_step % validation_steps == 0:
                     
                     # save out augmented images
                     if 'parallel_values' in batch:
                         
-                        for i in range(len(batch['parallel_values'])):
-                            objname = '_'.join(batch['static_pathes'][i].split('/')[-3:-1]).split('.')[0]
+                        for b in range(len(batch['parallel_values'])):
+                            objname = '_'.join(batch['static_pathes'][b].split('/')[-3:-1]).split('.')[0]
+                            visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}', f'{b:02d}_{objname}')
                             
-                            for j in range(batch['parallel_values'][i].shape[0]):
-                                img = batch['parallel_values'][i][j].cpu().numpy().transpose(1, 2, 0)
+                            for j in range(batch['parallel_values'][b].shape[0]):
+                                img = batch['parallel_values'][b][j].cpu().numpy().transpose(1, 2, 0)
                                 img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                                 img = Image.fromarray((img * 255).astype(np.uint8))
-                                visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}')
                                 os.makedirs(visual_outpath, exist_ok=True)
-                                img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_augmented_olat_parallel_pair{j:02d}.png"))
+                                img.save(os.path.join(visual_outpath, f"augmented_olat_parallel_pair{j:02d}.png"))
                             
-                            img = batch['parallel_values_hstacked'][i].cpu().numpy().transpose(1, 2, 0) # no need to scale this, as this is not scaled in the dataloader
+                            img = batch['parallel_values_hstacked'][b].cpu().numpy().transpose(1, 2, 0) # no need to scale this, as this is not scaled in the dataloader
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_augmented_olat_parallel_hstacked.png"))
+                            img.save(os.path.join(visual_outpath, f"augmented_olat_parallel_hstacked.png"))
                             
-                            img = batch['static_values'][i].cpu().numpy().transpose(1, 2, 0)
+                            img = batch['static_values'][b].cpu().numpy().transpose(1, 2, 0)
                             img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_static.png"))
-                            
-                            img = batch['albedo_values'][i].cpu().numpy().transpose(1, 2, 0)
+                            img.save(os.path.join(visual_outpath, f"static.png"))
+
+                            img = batch['albedo_values'][b].cpu().numpy().transpose(1, 2, 0)
                             img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_albedo.png"))
+                            img.save(os.path.join(visual_outpath, f"albedo.png"))
                             
                             if 'unet_fr' in locals() and global_step >= args.forward_rendering_warmup_steps:
-                                pred_decode = vae.decode((model_pred_fr[:bsz][i][None,...].float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
+                                
+                                # visual of forward rendering prediction
+                                fr_pred = model_fr_pred[b:b+1]
+                                alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
+                                sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
+                                denom_ = alpha_t_**2 + sigma_t_**2
+                                fr_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * fr_pred) / denom_  # [1,4,h,w]
+                                
+                                pred_decode = vae.decode((fr_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
                                 img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
                                 img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                                 img = Image.fromarray((img * 255).astype(np.uint8))
-                                img.save(os.path.join(visual_outpath, f"{i:02d}_{objname}_fr_pred.png"))
+                                img.save(os.path.join(visual_outpath, f"pred_fr_static.png"))
+                                
+                                # visual of albedo prediction
+                                albedo_pred = unet_fr_input[b:b+1, 4:8].float() # from rgb2x, therefore use default vae scaling_factor
+                                alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
+                                sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
+                                denom_ = alpha_t_**2 + sigma_t_**2
+                                albedo_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * albedo_pred) / denom_  # [1,4,h,w]
+                                
+                                # get the decoded albedo image
+                                pred_decode = vae.decode((albedo_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
+                                img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
+                                img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
+                                img = Image.fromarray((img * 255).astype(np.uint8))
+                                img.save(os.path.join(visual_outpath, f"pred_ir_albedo.png"))
                             
                             # TODO: save out the olat hdri
                             
@@ -2377,8 +2584,8 @@ def main():
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        
         unet = unwrap_model(unet)
-
         pipeline = LotusGPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             text_encoder=text_encoder,
@@ -2387,8 +2594,20 @@ def main():
             revision=args.revision,
             variant=args.variant,
         )
-        pipeline.save_pretrained(args.output_dir)
-        
+        pipeline.save_pretrained(os.path.join(args.output_dir, 'pipe'))
+
+        if 'unet_fr' in locals():
+            unet_fr = unwrap_model(unet_fr)
+            pipeline_fr = LotusGPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                text_encoder=text_encoder,
+                vae=vae,
+                unet=unet_fr,
+                revision=args.revision,
+                variant=args.variant,
+            )
+            pipeline_fr.save_pretrained(os.path.join(args.output_dir, 'pipe_fr'))
+
         if args.use_lora:
             unet_lora_state_dict = convert_state_dict_to_diffusers(
                 get_peft_model_state_dict(unet, adapter_name='lora_lotus')
@@ -2398,6 +2617,16 @@ def main():
                 unet_lora_layers=unet_lora_state_dict,
                 safe_serialization=True,
             )
+            
+            if 'unet_fr' in locals():
+                unet_fr_lora_state_dict = convert_state_dict_to_diffusers(
+                    get_peft_model_state_dict(unet_fr, adapter_name='lora_lotus_fr')
+                )
+                LotusGPipeline.save_lora_weights(
+                    save_directory=os.path.join(args.output_dir, 'pipe_fr'),
+                    unet_lora_layers=unet_fr_lora_state_dict,
+                    safe_serialization=True,
+                )
 
     accelerator.end_training()
 

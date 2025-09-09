@@ -50,10 +50,10 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export VAL_STEP=500
 export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
-export FORWARD_RENDERING_WARMUP_STEPS=1000
+export FORWARD_RENDERING_WARMUP_STEPS=40000
 
 # output dir
-export OUTPUT_DIR="output/relighting/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_FR_warmup${FORWARD_RENDERING_WARMUP_STEPS}_train_fr_x02vpred"
+export OUTPUT_DIR="output/relighting/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-noFR"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -79,7 +79,7 @@ accelerate launch --mixed_precision="fp16" \
   --gradient_checkpointing \
   --max_grad_norm=1 \
   --seed=42 \
-  --max_train_steps=100000 \
+  --max_train_steps=40000 \
   --learning_rate=3e-05 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \

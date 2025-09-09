@@ -2,7 +2,8 @@
 
 # export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 # export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-export MODEL_NAME="zheng95z/rgb-to-x"
+# export MODEL_NAME="zheng95z/rgb-to-x"
+export MODEL_NAME="zheng95z/x-to-rgb"
 
 # training dataset
 # Set environment variables based on machine name
@@ -34,11 +35,11 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=7
 
 # model configs
 export TIMESTEP=999
-export TASK_NAME="albedo"
+export TASK_NAME="forward"
 
 # data augmentatoin
 export AUG_RATIO="1:0"
@@ -53,7 +54,7 @@ export EVAL_TOP_K=50
 export FORWARD_RENDERING_WARMUP_STEPS=1000
 
 # output dir
-export OUTPUT_DIR="output/relighting/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_FR_warmup${FORWARD_RENDERING_WARMUP_STEPS}_train_fr_x02vpred"
+export OUTPUT_DIR="output/relighting/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
