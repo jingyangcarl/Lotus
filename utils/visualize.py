@@ -138,7 +138,7 @@ def visualize_normal(target_dir, prefixs, img, pred_norm, pred_kappa,
 
 def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
                         gt_albedo, gt_albedo_mask, pred_error, num_vis=-1):
-    """ visualize normal
+    """ visualize albedo
     """
     error_max = 60.0
 
@@ -178,6 +178,54 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
                 
         # img, albedo, gt, error
         all_imgs = [img[i,...]/255., pred_albedo[i, ...], gt_albedo[i, ...], plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
+        target_path = '%s/%s.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, all_imgs)
+        
+    return all_imgs
+
+
+def visualize_img(target_dir, prefixs, img, albedo, irradiance, pred_img, pred_kappa,
+                        pred_error, num_vis=-1):
+    """ visualize albedo
+    """
+    error_max = 60.0
+
+    img = tensor_to_numpy(img)                      # (B, H, W, 3)
+    albedo = tensor_to_numpy(albedo)                # (B, H, W, 3)
+    irradiance = tensor_to_numpy(irradiance)        # (B, H, W, 3)
+    pred_img = tensor_to_numpy(pred_img)            # (B, H, W, 3)
+    pred_kappa = tensor_to_numpy(pred_kappa)        # (B, H, W, 1)
+    pred_error = tensor_to_numpy(pred_error)        # (B, H, W, 1)
+
+    num_vis = len(prefixs) if num_vis == -1 else num_vis
+    for i in range(num_vis):
+        # img
+        img_ = unnormalize(img[i, ...])
+        target_path = '%s/%s/img.png' % (target_dir, prefixs[i])
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        plt.imsave(target_path, img[i, ...])
+        
+        # albedo
+        target_path = '%s/%s/albedo.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, albedo[i, ...])
+        
+        # irradiance
+        target_path = '%s/%s/irradiance.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, irradiance[i, ...])
+
+        # pred_norm 
+        target_path = '%s/%s/pred_img.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, pred_img[i, ...])
+
+        # pred_kappa
+        if pred_kappa is not None:
+            pred_alpha = kappa_to_alpha(pred_kappa[i, :, :, 0])
+            target_path = '%s/%s/pred_alpha.png' % (target_dir, prefixs[i])
+            plt.imsave(target_path, pred_alpha, vmin=0.0, vmax=error_max, cmap='jet')
+                
+        # img, albedo, gt, error
+        all_imgs = [img[i,...], irradiance[i, ...], pred_img[i, ...]]
         all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
         target_path = '%s/%s.png' % (target_dir, prefixs[i])
         plt.imsave(target_path, all_imgs)

@@ -406,10 +406,18 @@ def evaluation_material(
     for dataset_name, split in eval_datasets:
 
         if dataset_name == 'lightstage':
-            from utils.lightstage_dataset import LightstageDataset
-            samples = LightstageDataset(split=split, tasks=task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
+            from utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage
+            test_dataset_lightstage = LightstageDataset(split=split, tasks=task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
         # print(f'Number of samples in {dataset_name} {split}: {len(samples)}')
-        test_loader = DataLoader(samples, 1, shuffle=False, num_workers=1, pin_memory=True)
+        bsz = 1
+        test_loader = DataLoader(
+            test_dataset_lightstage, 
+            batch_size=bsz, 
+            shuffle=False, 
+            collate_fn=collate_fn_lightstage,
+            num_workers=1, 
+            pin_memory=True
+        )
         test_loader = accelerator.prepare(test_loader)
         
         results_dir = None
@@ -427,9 +435,9 @@ def evaluation_material(
             for data_dict in tqdm(validation_batch, desc=f"Evaluating {dataset_name} {split} via {model_alias} on {distributed_state.device}"):
                 #↓↓↓↓
                 #NOTE: forward pass
-                img = data_dict['static_value'].to(distributed_state.device) # [1, 3, h, w]
-                img_path = data_dict['static_path'][0] # e.g. 'lightstage/scene1/img1.png'
-                img_meta = data_dict['text']
+                # img = data_dict['static_value'].to(distributed_state.device) # [1, 3, h, w]
+                img_path = data_dict['static_paths'][bsz-1] # e.g. 'lightstage/scene1/img1.png'
+                img_meta = data_dict['texts'][bsz-1]
                 intrins = None
 
                 # pad input
@@ -438,9 +446,9 @@ def evaluation_material(
                 # img, intrins = normal_utils.pad_input(img, intrins, lrtb)
                 
                 # also evaluate the image pairs
-                img_pairs = [img[0]]
-                img_pairs += [parallel_img.to(distributed_state.device) for parallel_img in data_dict['parallel_value'][0]]
-                
+                img_pairs = [data_dict['static_values'].to(distributed_state.device)[bsz-1]] # static image first
+                img_pairs += [parallel_img.to(distributed_state.device) for parallel_img in data_dict['parallel_values'][bsz-1]] # and then the parallel images
+
                 mosaics = []
                 for pidx, img_ in enumerate(img_pairs):
                     # forward pass
@@ -448,10 +456,10 @@ def evaluation_material(
                     # norm_out = pred_list[-1] # [1, 3, h, w]
                     img = (img_ * 0.5 + 0.5).clamp(0, 1) # img_ is in [-1,1]
 
-                    if args.task_name[0] == 'normal':
+                    if args.task_name[bsz-1] == 'normal':
                         if eval_mode == "load_prediction":
                             # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
-                            pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta[0]}_norm.png')
+                            pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta["obj"]}_norm.png')
                             norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
                             norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
                             norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
@@ -490,8 +498,8 @@ def evaluation_material(
                         pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
                         #↑↑↑↑
 
-                        if 'normal_w2c_value' in data_dict.keys():
-                            gt_norm = data_dict['normal_w2c_value'].to(distributed_state.device)
+                        if 'normal_w2c_values' in data_dict.keys():
+                            gt_norm = data_dict['normal_w2c_values'].to(distributed_state.device)
                             gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
 
                             # gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
@@ -512,9 +520,9 @@ def evaluation_material(
                                 prefixs = [f'{o}_cam{c}_l{l}' + '' if not pidx else f'_aug{pidx}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
                             mosaic = vis_utils.visualize_normal(results_dir, prefixs, img[None,...], pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
                             mosaics.append(mosaic)
-                    
-                    elif args.task_name[0] == 'albedo':
-                        
+
+                    elif args.task_name[bsz-1] == 'albedo':
+
                         if eval_mode == "generate_prediction":
                             if 'rgb2x' in model_alias:
                                 # img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
@@ -527,8 +535,9 @@ def evaluation_material(
                         pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
                         #↑↑↑↑
 
-                        if 'albedo_value' in data_dict.keys():
-                            gt_albedo = (data_dict['albedo_value'].to(distributed_state.device) + 1.0) / 2.0 # albedo_value is scaled to [-1,1] in dataloader, recover here
+                        # save prediction and gt
+                        if 'albedo_values' in data_dict.keys():
+                            gt_albedo = (data_dict['albedo_values'].to(distributed_state.device) + 1.0) / 2.0 # albedo_values is scaled to [-1,1] in dataloader, recover here
                             gt_albedo_mask = data_dict['albedo_mask'].to(distributed_state.device) if 'albedo_mask' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
 
                             pred_error = normal_utils.compute_normal_error(pred_albedo, gt_albedo)
@@ -537,6 +546,7 @@ def evaluation_material(
                             else:
                                 total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_albedo_mask]), dim=0)
 
+                        # save visualization mosaic
                         if results_dir is not None:
                             if 'i' in img_meta:
                                 prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
@@ -544,11 +554,54 @@ def evaluation_material(
                                 prefixs = [f'{o}_cam{c}_l{l}' + ('_noaug' if not pidx else f'_aug{pidx}') for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
                             mosaic = vis_utils.visualize_albedo(results_dir, prefixs, img[None,...], pred_albedo, pred_kappa, gt_albedo, gt_albedo_mask, pred_error)
                             mosaics.append(mosaic)
+
+                    elif args.task_name[bsz-1] == 'forward':
+
+                        if eval_mode == "generate_prediction":
+                            if 'x2rgb' in model_alias:
+                                img_black = torch.zeros_like(img)
+                                img_white = torch.ones_like(img)
+                                img_albedo = data_dict['albedo_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                                img_normal = data_dict['normal_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                                # img_normal = data_dict['normal_c2w_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                                img_irradiance = img_white if pidx == 0 else data_dict['irradiance_values'][bsz-1][pidx-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
+                                # img_irradiance = data_dict['pixel_irradiance_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
+
+                                img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance) # call rgb2x via img, for jpg input, results input checked the same
+                                img_out = pred_ret[bsz-1][0] # PIL
+                                img_out = (np.asarray(img_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                                img_out = torch.tensor(img_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+                        pred_img, pred_kappa = img_out[:, :3, :, :], img_out[:, 3:, :, :]
+                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+                        
+                        # save prediction and gt
+                        if 'static_values' in data_dict.keys():
+                            gt_img = img[None,...]
+                            gt_pixel_mask = data_dict['pixel_mask'].to(distributed_state.device) if 'pixel_mask' in data_dict.keys() else torch.ones_like(gt_img[:, :1, :, :], dtype=torch.bool)
+
+                            pred_error = normal_utils.compute_normal_error(pred_img, gt_img)
+                            if total_normal_errors is None:
+                                total_normal_errors = pred_error[gt_pixel_mask]
+                            else:
+                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_pixel_mask]), dim=0)
+
+                        # save visualization mosaic
+                        if results_dir is not None:
+                            in_irradiance = img_irradiance[None,...]
+                            in_albedo = img_albedo[None,...]
+                            if 'i' in img_meta:
+                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                            else:
+                                prefixs = [f'{o}_cam{c}_l{l}' + ('_noaug' if not pidx else f'_aug{pidx}') for (o,c,l) in zip([img_meta['obj']], [img_meta['cam']],[ img_meta['l']])]
+                            mosaic = vis_utils.visualize_img(os.path.join(results_dir, 'separated'), prefixs, gt_img, in_albedo, in_irradiance, pred_img, pred_kappa, pred_error)
+                            mosaics.append(mosaic)
                             
                 # concatnate mosaics
                 if len(mosaics) > 0:
                     mosaics = np.concatenate(mosaics, axis=0)  # (H*3, W, 3)
-                    target_path = '%s/%s.png' % (results_dir, f'{img_meta["obj"][0]}_cam{img_meta["cam"][0]}_l{img_meta["l"][0]}_all')
+                    target_path = '%s/%s.png' % (os.path.join(results_dir, 'mosaics'), f'{img_meta["obj"]}_cam{img_meta["cam"]}_l{img_meta["l"]}_all')
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     plt.imsave(target_path, mosaics)
                             
         metrics = None

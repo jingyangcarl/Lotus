@@ -35,7 +35,7 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=5
 
 # model configs
 export TIMESTEP=999
@@ -54,7 +54,7 @@ export EVAL_TOP_K=50
 export FORWARD_RENDERING_WARMUP_STEPS=1000
 
 # output dir
-export OUTPUT_DIR="output/relighting/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_fixOutColor_blkImg_fixBlkLatentScale"
+export OUTPUT_DIR="output/relighting/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_blackLatent4RoughnessAndMetallicDuringTrainInference"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \

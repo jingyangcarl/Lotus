@@ -370,19 +370,26 @@ def run_x2rgb_example_validation(
     with distributed_state.split_between_processes(validation_images) as validation_batch:
         for i in tqdm(range(len(validation_batch)), desc=f"x2rgb quick_eval on {distributed_state.device}"):
             rgb2x_save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val', model_alias.replace('x2rgb', 'rgb2x'))
+            img_rgb = load_image(validation_batch[i]).to(accelerator.device)
+            img_blk = torch.zeros_like(img_rgb) # fill empty channels with black matching the training setting
+            img_wht = torch.ones_like(img_rgb)
             gbuffer, preds, prompts = x2rgb(
                 validation_batch[i],
                 os.path.join(rgb2x_save_dir, f'{i:02d}_albedo.jpg'),
                 os.path.join(rgb2x_save_dir, f'{i:02d}_normal.jpg'),
-                os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
-                os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
-                os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
+                '', '', '', # no roughness, metallic, irradiance
+                # os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
+                # os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
+                # os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
                 'static',
                 pipeline,
                 accelerator,
                 generator,
                 inference_step, 
-                num_samples
+                num_samples,
+                img_roughness=img_blk,
+                img_metallic=img_blk,
+                img_irradiance=img_wht,
             )
 
             for j, (pred, prompt) in enumerate(zip(preds, prompts)):
@@ -424,6 +431,8 @@ def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval
 
         if 'rgb2x' in model_alias:
             gen_prediction = rgb2x
+        elif 'x2rgb' in model_alias:
+            gen_prediction = x2rgb
         elif 'lotus' in model_alias:
             gen_prediction = gen_lotus_normal
         elif 'dsine' in model_alias:
@@ -910,11 +919,11 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             pipeline.enable_xformers_memory_efficient_attention()
             
         # Run example-validation
-        run_x2rgb_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
+        # run_x2rgb_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
 
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
-            # run_brdf_evaluation(pipeline_x2rgb, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
             pass
 
         del pipeline
@@ -939,7 +948,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if enable_eval:
             run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
-    enable_eval = False
+    enable_eval = True
     if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
         assert args.task_name[0] in ['normal', 'depth'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
         if args.use_lora:
@@ -961,7 +970,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     elif 'zheng95z/x-to-rgb' in args.pretrained_model_name_or_path:
         assert args.task_name[0] in ['forward'], f"{args.pretrained_model_name_or_path} pipeline support forward rendering task."
         if args.use_lora:
-            wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            # wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
         else:
@@ -1104,7 +1113,6 @@ def parse_args():
         "--lightstage_lighting_augmentation",
         type=str,
         default="random8",
-        choices=["random8", "random16", "-random8", "-random16", "hdri", "none"],
     )
     parser.add_argument(
         "--lightstage_lighting_augmentation_pair_n",
@@ -2037,6 +2045,9 @@ def main():
         log_rgb_loss = 0.0
         log_rgb_pair_loss = 0.0
         log_relighting_loss = 0.0
+        
+        total_samples = 0
+        augmented_samples = 0
 
         # for _ in range(len(train_dataloader_hypersim)):
         for _ in range(db_samples):
@@ -2070,6 +2081,10 @@ def main():
                         continue # next epoch
                 else:
                     raise ValueError("No dataset has positive probability. Please check your dataset probabilities.")
+                
+            if 'augmented' in batch:
+                total_samples += batch["pixel_values"].shape[0]
+                augmented_samples += batch["augmented"].sum().item()
 
             with accelerator.accumulate(unet, unet_fr if 'unet_fr' in locals() else None):
                 # Convert images to latent space
@@ -2127,12 +2142,22 @@ def main():
                     num_tasks = 1
                     bsz_per_task = int(bsz/(num_tasks+1))
                     
+                    black_img = torch.zeros_like(batch["pixel_values"])
+                    albedo_latents = vae.encode(batch["albedo_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    irradiance_latents = F.interpolate(batch["pixel_irradiance_values"], size=albedo_latents.shape[-2:], mode='bilinear', align_corners=False)
+                    # normal_latents = vae.encode(batch["normal_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    # black_latents = vae.encode(black_img.to(weight_dtype)).latent_dist.sample() # this cause rendering looks green
                     black_latents = torch.zeros_like(rgb_latents[:bsz_per_task])
-                    gbuffer_latents = vae.encode(
-                        torch.cat((batch["albedo_values"],batch["normal_values"]), dim=0).to(weight_dtype)
-                    ).latent_dist.sample() # [2B, 4, h, w]
-                    gbuffer_latents = gbuffer_latents * vae.config.scaling_factor
-                    gbuffer_latents = torch.cat((gbuffer_latents[:bsz_per_task], gbuffer_latents[:bsz_per_task], black_latents, black_latents, black_latents[:,:3]), dim=1) # [B, 15, h, w]
+                    black_latents_scale = black_latents * vae.config.scaling_factor
+                    gbuffer_latents = torch.cat((albedo_latents, black_latents_scale, black_latents_scale, black_latents_scale, irradiance_latents[:,:3]), dim=1) # [B, 15, h, w]
+                    
+                    # black_latents = torch.zeros_like(rgb_latents[:bsz_per_task])
+                    # gbuffer_latents = vae.encode(
+                    #     torch.cat((batch["albedo_values"],batch["normal_values"]), dim=0).to(weight_dtype)
+                    # ).latent_dist.sample() # [2B, 4, h, w]
+                    # gbuffer_latents = gbuffer_latents * vae.config.scaling_factor
+                    # gbuffer_latents = torch.cat((gbuffer_latents[:bsz_per_task], gbuffer_latents[:bsz_per_task], black_latents, black_latents, black_latents[:,:3]), dim=1) # [B, 15, h, w]
+
                     target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
                     bsz = black_latents.shape[0] # update bsz to the real batch size
                 else:
@@ -2423,6 +2448,7 @@ def main():
                     "L_R": rgb_loss.detach().item(), 
                     "L_RP": rgb_pair_loss.detach().item(),
                     "L_FR": rendering_loss.detach().item(),
+                    "R_AG": augmented_samples / total_samples if total_samples > 0 else 0.0,
                     "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
         
@@ -2501,31 +2527,49 @@ def main():
                     # save out augmented images
                     if 'parallel_values' in batch:
                         
+                        visual_mosaic_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', 'mosaic', f'step{global_step:05d}.png')
+                        os.makedirs(os.path.dirname(visual_mosaic_outpath), exist_ok=True)
+
+                        mosaics = []
+                        mosaics.append(batch['pixel_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['pixel_irradiance_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['albedo_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['normal_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['normal_c2w_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['static_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(torch.ones_like(batch['static_values']).cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3], irradiance for static is not available, fill with 1
+                        for j in range(batch['parallel_values'].shape[1]):
+                            mosaics.append(batch['parallel_values'][:,j].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                            mosaics.append(batch['irradiance_values'][:,j].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics = np.concatenate(mosaics, axis=2) # [B, h, w*7, 3]
+                        mosaic = np.concatenate(mosaics, axis=0) # [B*h, w*7, 3]
+                        mosaic = (mosaic + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
+                        mosaic = Image.fromarray((mosaic * 255).astype(np.uint8))
+                        mosaic.save(visual_mosaic_outpath)
+
                         for b in range(len(batch['parallel_values'])):
-                            objname = '_'.join(batch['static_pathes'][b].split('/')[-3:-1]).split('.')[0]
-                            visual_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', f'step{global_step:05d}', f'{b:02d}_{objname}')
+                            objname = '_'.join(batch['static_paths'][b].split('/')[-3:-1]).split('.')[0]
+                            visual_sep_outpath = os.path.join(args.output_dir, 'visual', 'aug_parallel', 'separate', f'step{global_step:05d}', f'{b:02d}_{objname}')
+                            os.makedirs(visual_sep_outpath, exist_ok=True)
                             
                             for j in range(batch['parallel_values'][b].shape[0]):
                                 img = batch['parallel_values'][b][j].cpu().numpy().transpose(1, 2, 0)
                                 img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
                                 img = Image.fromarray((img * 255).astype(np.uint8))
-                                os.makedirs(visual_outpath, exist_ok=True)
-                                img.save(os.path.join(visual_outpath, f"augmented_olat_parallel_pair{j:02d}.png"))
+                                img.save(os.path.join(visual_sep_outpath, f"augmented_olat_parallel_pair{j:02d}.png"))
+                                
+                                img = batch['irradiance_values'][b][j].cpu().numpy().transpose(1, 2, 0)
+                                img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
+                                img = Image.fromarray((img * 255).astype(np.uint8))
+                                img.save(os.path.join(visual_sep_outpath, f"augmented_olat_irradiance_pair{j:02d}.png"))
+                                
                             
                             img = batch['parallel_values_hstacked'][b].cpu().numpy().transpose(1, 2, 0) # no need to scale this, as this is not scaled in the dataloader
                             img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"augmented_olat_parallel_hstacked.png"))
+                            img.save(os.path.join(visual_sep_outpath, f"augmented_olat_parallel_hstacked.png"))
                             
-                            img = batch['static_values'][b].cpu().numpy().transpose(1, 2, 0)
-                            img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
-                            img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"static.png"))
-
-                            img = batch['albedo_values'][b].cpu().numpy().transpose(1, 2, 0)
-                            img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
-                            img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_outpath, f"albedo.png"))
                             
+                            # the following is only used for rgb2x and x2rgb is also enabled
                             if 'unet_fr' in locals() and global_step >= args.forward_rendering_warmup_steps:
                                 
                                 # visual of forward rendering prediction
