@@ -42,19 +42,21 @@ export TIMESTEP=999
 export TASK_NAME="forward"
 
 # data augmentatoin
-export AUG_RATIO="1:0"
-export AUG_TYPE="-random8"
+export AUG_RATIO="1:1"
+export AUG_TYPE="random1"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
+export TRAIN_STEP=300000
 export VAL_STEP=500
 export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 export FORWARD_RENDERING_WARMUP_STEPS=1000
+export EVALUATION_OLAT_STEPS=10000
 
 # output dir
-export OUTPUT_DIR="output/relighting/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_fixOutColor_blkImg_fixBlkLatentScale"
+export OUTPUT_DIR="output/relighting/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}_aug_random1_eval_346olat_noAvgIrradiance_300k_x2rgb_nogamma_trainFromScratch"
 
 accelerate launch --mixed_precision="fp16" \
   --main_process_port="13226" \
@@ -80,7 +82,7 @@ accelerate launch --mixed_precision="fp16" \
   --gradient_checkpointing \
   --max_grad_norm=1 \
   --seed=42 \
-  --max_train_steps=100000 \
+  --max_train_steps=$TRAIN_STEP \
   --learning_rate=3e-05 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
@@ -91,10 +93,11 @@ accelerate launch --mixed_precision="fp16" \
   --validation_steps=$VAL_STEP \
   --evaluation_steps=$EVAL_STEP \
   --checkpointing_steps=$VAL_STEP \
+  --evaluation_olat_steps=$EVALUATION_OLAT_STEPS \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
-  --use_lora \
   --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
-  --save_pred_vis
+  --save_pred_vis \
+  --train_unet_from_scratch

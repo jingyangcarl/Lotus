@@ -517,7 +517,7 @@ def evaluation_material(
                             if 'i' in img_meta:
                                 prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
                             else:
-                                prefixs = [f'{o}_cam{c}_l{l}' + '' if not pidx else f'_aug{pidx}' for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
+                                prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip(img_meta['obj'], img_meta['mat'], img_meta['cam'], img_meta['l'])]
                             mosaic = vis_utils.visualize_normal(results_dir, prefixs, img[None,...], pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
                             mosaics.append(mosaic)
 
@@ -577,7 +577,7 @@ def evaluation_material(
                         
                         # save prediction and gt
                         if 'static_values' in data_dict.keys():
-                            gt_img = img[None,...]
+                            gt_img = img[None,...] # img in [0,1]
                             gt_pixel_mask = data_dict['pixel_mask'].to(distributed_state.device) if 'pixel_mask' in data_dict.keys() else torch.ones_like(gt_img[:, :1, :, :], dtype=torch.bool)
 
                             pred_error = normal_utils.compute_normal_error(pred_img, gt_img)
@@ -593,10 +593,51 @@ def evaluation_material(
                             if 'i' in img_meta:
                                 prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
                             else:
-                                prefixs = [f'{o}_cam{c}_l{l}' + ('_noaug' if not pidx else f'_aug{pidx}') for (o,c,l) in zip([img_meta['obj']], [img_meta['cam']],[ img_meta['l']])]
+                                prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['mat']], [img_meta['cam']], [img_meta['l']])]
                             mosaic = vis_utils.visualize_img(os.path.join(results_dir, 'separated'), prefixs, gt_img, in_albedo, in_irradiance, pred_img, pred_kappa, pred_error)
                             mosaics.append(mosaic)
                             
+                            # rendering olat
+                            step = eval_dir.split('/')[-1].replace('step','')
+                            if int(step) % args.evaluation_olat_steps == 0 and pidx == 0:
+                                import imageio
+                            
+                                results_dir_olat = os.path.join(output_dir, 'olat')
+                                os.makedirs(results_dir_olat, exist_ok=True)
+                                results_dir_olat_frames = os.path.join(results_dir_olat, 'frames', f'{img_meta["obj"]}_cam{img_meta["cam"]}')
+                                os.makedirs(results_dir_olat_frames, exist_ok=True)
+                                
+                                olat_target_frames = 20
+                                N_OLATS = test_dataset_lightstage.omega_i_world.shape[0]
+                                intensity_scalar = test_dataset_lightstage.olat_wi_rgb_intensity['random1'] / N_OLATS
+                                olat_img_scalar = test_dataset_lightstage.olat_img_intensity['random1']
+                                olat_step = N_OLATS // olat_target_frames
+                                
+                                Ls = torch.tensor(test_dataset_lightstage.omega_i_world[::olat_step]).to(img.device) # (n, 3)
+                                nDotL = torch.einsum('nc,chw->nhw', Ls, data_dict['normal_ls_c2w_values'][bsz-1]) # (n, h, w)
+                                L_rgb = intensity_scalar * torch.ones_like(Ls) # (n, 3)
+                                L_irradiance = torch.einsum('nhw,nc->nchw', torch.maximum(nDotL, torch.tensor(0.0)), L_rgb) # (3, h, w), align with random 1
+                                frame_mosaics = []
+                                for i, img_irradiance_ in enumerate(L_irradiance[:olat_target_frames//2]): # (3, h, w)
+                                    # render one view
+                                    img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance_) # call rgb2x via img, for jpg input, results input checked the same
+                                    frmae_out = pred_ret[bsz-1][0] # PIL
+                                    frmae_out = (np.asarray(frmae_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                                    frmae_out = torch.tensor(frmae_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                                    frmae_out = frmae_out[:, :3, :, :]
+                                    frmae_out = frmae_out.clamp(0,1)
+                                    
+                                    frame_id = i*olat_step
+                                    # save frame
+                                    in_irradiance_ = img_irradiance_[None,...]
+                                    gt_img_ = (olat_img_scalar * intensity_scalar * torch.tensor(imageio.imread(os.path.join(os.path.dirname(data_dict['parallel_paths'][bsz-1][0][0]), f'{frame_id+2:06d}.jpg')) / 255.0).permute(2,0,1).unsqueeze(0).to(distributed_state.device)).clip(0, 1) # [1, 3, h, w], load gt from the lightstage video folder
+                                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['mat']], [img_meta['cam']], [i])]
+                                    frame_mosaic = vis_utils.visualize_img(results_dir_olat_frames, prefixs, gt_img_, in_albedo, in_irradiance_, frmae_out, pred_kappa, pred_error)
+                                    frame_mosaics.append(frame_mosaic)
+                                    
+                                # save a mp4 video
+                                imageio.mimwrite(os.path.join(results_dir_olat, f'{prefixs[0]}_olat.mp4'), frame_mosaics, fps=5, quality=8)
+
                 # concatnate mosaics
                 if len(mosaics) > 0:
                     mosaics = np.concatenate(mosaics, axis=0)  # (H*3, W, 3)

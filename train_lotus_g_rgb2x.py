@@ -974,7 +974,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
         else:
-            wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
 
     # generate pretrained results
@@ -1184,6 +1184,11 @@ def parse_args():
         default=5000,
     )
     parser.add_argument(
+        "--evaluation_olat_steps",
+        type=int,
+        default=10000,
+    )
+    parser.add_argument(
         "--validation_top_k",
         type=int,
         default=0,
@@ -1356,6 +1361,7 @@ def parse_args():
         default=0,
         help="Number of steps to warmup the rendering loss. When set larger than total training steps, the rendering loss will be disabled.",
     )
+    parser.add_argument('--train_unet_from_scratch', action='store_true', help="Whether to train unet from scratch.")
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -1549,6 +1555,11 @@ def main():
             args.pretrained_model_name_or_path.replace('-inverse-', '-forward-'), subfolder="unet", revision=args.revision, variant=args.variant,
             low_cpu_mem_usage=False, device_map=None,
         )
+        
+    if args.train_unet_from_scratch:
+        # https://github.com/huggingface/diffusers/discussions/8458
+        config = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
+        unet = UNet2DConditionModel.from_config(config=config.config)
         
     # Apply LoRA to all attention processors
     if args.use_lora:

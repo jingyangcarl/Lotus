@@ -64,7 +64,7 @@ class LightstageDataset(Dataset):
                 
                 if n_cross == 350 and n_paral == 350:
                     # for l in range(350):
-                    for l in range(10): # debug
+                    for l in range(10): # debug #
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':
@@ -142,8 +142,8 @@ class LightstageDataset(Dataset):
         self.static_parallel_paths = []
         self.olat_cross_paths = []
         self.olat_parallel_paths = []
-        self.olat_omega_i_dirs = []
-        self.olat_omega_i_rgbs = []
+        self.olat_wi_dirs = []
+        self.olat_wi_rgbs = []
         self.albedo_paths = []
         self.normal_paths = []
         self.specular_paths = []
@@ -155,6 +155,10 @@ class LightstageDataset(Dataset):
         for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')): # annoying when multi gpu
         # for rowidx, row in enumerate(metadata):
         
+            # clean up the metadata
+            metadata[rowidx]['mat'] = '' if pd.isna(metadata[rowidx]['mat']) else metadata[rowidx]['mat']
+        
+            # general filter to remove the first 2 and last 2 lighting, since they are not OLAT sequence
             if row['l'] <= 1 or row['l'] >= 348:
                 # 2+346+2, 3,695,650 samples
                 continue
@@ -190,6 +194,9 @@ class LightstageDataset(Dataset):
                     # filter out those lighting != 2 to evaluate only the static lighting
                     if metadata[rowidx]['l'] != 2: # l==0 is filtered earlier via the general filter
                         continue
+
+                    if rowidx / len(metadata) < train_eval_split:
+                        metadata[rowidx]['mat'] += '+' # add a tag to distinguish the training and testing object
                     pass
 
             self.texts.append(row)
@@ -224,7 +231,7 @@ class LightstageDataset(Dataset):
             # change the cross_path and parallel_path to list of paths that consists of various lighting
             # lighting_augmentation = 'random8' # 'single', 'random2', 'random4', 'hdri'
             
-            def get_random_olat(n, intensity_scalar=1.0):
+            def get_random_olat(n, olat_wi_rgb_intensity=1.0):
                 
                 # the weights should be scaled by 1/N_OLATS to keep the same total intensity
                 # this could lead to extreme dimming when we only pick randomly a few lights, we therefore use a intensity_scalar to compensate
@@ -234,22 +241,22 @@ class LightstageDataset(Dataset):
                 # prepare the return variables
                 olat_cross_path = []
                 olat_parallel_path = []
-                olat_omega_i_rgb = []
-                olat_omega_i_dir = []
+                olat_wi_rgb = []
+                olat_wi_dir = []
                 
                 if n > 0:
                     # sample n random lights from self.omega_i_world
                     for i in range(self.lighting_augmentation_pair_n):
                         # sample lights and weights and dir
                         olat_random_lights = np.random.choice(self.omega_i_world.shape[0], n, replace=False)
-                        olat_omega_i_dir.append([self.omega_i_world[random_light] for random_light in olat_random_lights])
-                        olat_omega_i_rgb.append(intensity_scalar * np.ones((n, 3), dtype=np.float32) / N_OLATS) # use ones as the rgb weight
+                        olat_wi_dir.append([self.omega_i_world[random_light] for random_light in olat_random_lights])
+                        olat_wi_rgb.append(olat_wi_rgb_intensity * np.ones((n, 3), dtype=np.float32) / N_OLATS) # use ones as the rgb weight
                         # get corresponding paths
                         olat_random_lights = [int(x) + 2 for x in olat_random_lights] # map this actual light index to the light index in the file name
                         olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in olat_random_lights])
                         olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{random_light:06d}.{img_ext}') for random_light in olat_random_lights])
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0] == str), f'cross_path should be a list of strings, got {type(olat_cross_path)}'
-                    return olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb
+                    return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
                 
                 elif n < 0:
                     # sample n random lights from self.omega_i_world and subtract from all lights
@@ -259,9 +266,9 @@ class LightstageDataset(Dataset):
                         # sample lights and weights and dir
                         olat_random_lights = np.random.choice(self.omega_i_world.shape[0], n, replace=False)
                         olat_omega_i_dir_minus = [self.omega_i_world[random_light] for random_light in olat_random_lights]
-                        olat_omega_i_dir.append(np.vstack((np.array([0.0, 0.0, 0.0], dtype=np.float32), np.array(olat_omega_i_dir_minus)))) # add one for all white
+                        olat_wi_dir.append(np.vstack((np.array([0.0, 0.0, 0.0], dtype=np.float32), np.array(olat_omega_i_dir_minus)))) # add one for all white
                         olat_omega_i_rgb_minus = -np.ones((n, 3), dtype=np.float32) / N_OLATS # use ones as the rgb weight
-                        olat_omega_i_rgb.append(intensity_scalar * np.vstack((np.ones((1, 3), dtype=np.float32), olat_omega_i_rgb_minus))) # add one for all white
+                        olat_wi_rgb.append(olat_wi_rgb_intensity * np.vstack((np.ones((1, 3), dtype=np.float32), olat_omega_i_rgb_minus))) # add one for all white
                         # get corresponding paths
                         olat_random_lights = [int(x) + 2 for x in olat_random_lights] # map this actual light index to the light index in the file name
                         olat_cross_path_minus = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{random_light:06d}.{img_ext}') for random_light in olat_random_lights]
@@ -269,31 +276,34 @@ class LightstageDataset(Dataset):
                         olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross_hdri', f'allwhite.exr')] + olat_cross_path_minus)
                         olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel_hdri', f'allwhite.exr')] + olat_parallel_path_minus)
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0] == str), f'cross_path should be a list of strings, got {type(olat_cross_path)}'
-                    return olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb
+                    return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
                 
-            self.olat_img_scalar = 1.0
-            if self.lighting_augmentation == 'random1':
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(1, 100.0)
-                self.olat_img_scalar = 40.0
-            elif self.lighting_augmentation == 'random2':
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(2)
-            elif self.lighting_augmentation == 'random8':
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(8, 100.0)
-                self.olat_img_scalar = 10
-            elif self.lighting_augmentation == 'random16':
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(16)
+            self.olat_wi_rgb_intensity = {
+                'random1': 100.0,
+                'random2': 100.0,
+                'random8': 100.0,
+                'random16': 50.0
+            } # this factor controls the light source brightness, the higher the brighter
+            self.olat_img_intensity = {
+                'random1': 40.0,
+                'random2': 40.0,
+                'random8': 20.0,
+                'random16': 5.0
+            } # this factor controls the image brightness, the higher the brighter
+            if self.lighting_augmentation.startswith('random'):
+                olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb = get_random_olat(1, self.olat_wi_rgb_intensity[self.lighting_augmentation])
             elif self.lighting_augmentation == '-random8': 
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(-8, 0.25)
+                olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb = get_random_olat(-8, 0.25)
             elif self.lighting_augmentation == '-random16':
-                olat_cross_path, olat_parallel_path, olat_omega_i_dir, olat_omega_i_rgb = get_random_olat(-16)
+                olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb = get_random_olat(-16)
             elif self.lighting_augmentation == 'hdri':
                 pass
             else:
                 raise NotImplementedError(f'Lighting augmentation {self.lighting_augmentation} is not implemented')
             assert type(olat_cross_path) == list, f'cross_path should be a list, got {type(olat_cross_path)}'
             assert type(olat_parallel_path) == list, f'parallel_path should be a list, got {type(olat_parallel_path)}'
-            assert type(olat_omega_i_dir) == list, f'olat_omega_i should be a list, got {type(olat_omega_i_dir)}'
-            assert type(olat_omega_i_rgb) == list, f'olat_omega_i_rgb should be a list, got {type(olat_omega_i_rgb)}'
+            assert type(olat_wi_dir) == list, f'olat_omega_i should be a list, got {type(olat_wi_dir)}'
+            assert type(olat_wi_rgb) == list, f'olat_omega_i_rgb should be a list, got {type(olat_wi_rgb)}'
                 
             # check if the paths are valid, 42k examples took 2min, remove from this and add a preprocess check
             # this only need to be enabled once, disable later to save time
@@ -315,8 +325,8 @@ class LightstageDataset(Dataset):
             self.static_parallel_paths.append(static_parallel_path)
             self.olat_cross_paths.append(olat_cross_path)
             self.olat_parallel_paths.append(olat_parallel_path)
-            self.olat_omega_i_dirs.append(olat_omega_i_dir)
-            self.olat_omega_i_rgbs.append(olat_omega_i_rgb)
+            self.olat_wi_dirs.append(olat_wi_dir)
+            self.olat_wi_rgbs.append(olat_wi_rgb)
             self.albedo_paths.append(albedo_path)
             self.normal_paths.append(normal_path)
             self.specular_paths.append(specular_path)
@@ -351,8 +361,8 @@ class LightstageDataset(Dataset):
             debug_static_parallel_paths = []
             debug_olat_cross_paths = []
             debug_olat_parallel_paths = []
-            debug_olat_omega_i_dirs = []
-            debug_olat_omega_i_rgbs = []
+            debug_olat_wi_dirs = []
+            debug_olat_wi_rgbs = []
             debug_albedo_paths = []
             debug_normal_paths = []
             debug_specular_paths = []
@@ -378,8 +388,8 @@ class LightstageDataset(Dataset):
             self.static_parallel_paths = debug_static_parallel_paths + [self.static_parallel_paths[i] for i in eval_idx]
             self.olat_cross_paths = debug_olat_cross_paths + [self.olat_cross_paths[i] for i in eval_idx]
             self.olat_parallel_paths = debug_olat_parallel_paths + [self.olat_parallel_paths[i] for i in eval_idx]
-            self.olat_omega_i_dirs = debug_olat_omega_i_dirs + [self.olat_omega_i_dirs[i] for i in eval_idx]
-            self.olat_omega_i_rgbs = debug_olat_omega_i_rgbs + [self.olat_omega_i_rgbs[i] for i in eval_idx]
+            self.olat_wi_dirs = debug_olat_wi_dirs + [self.olat_wi_dirs[i] for i in eval_idx]
+            self.olat_wi_rgbs = debug_olat_wi_rgbs + [self.olat_wi_rgbs[i] for i in eval_idx]
             self.albedo_paths = debug_albedo_paths + [self.albedo_paths[i] for i in eval_idx]
             self.normal_paths = debug_normal_paths + [self.normal_paths[i] for i in eval_idx]
             self.specular_paths = debug_specular_paths + [self.specular_paths[i] for i in eval_idx]
@@ -504,8 +514,8 @@ class LightstageDataset(Dataset):
         static_path = self.static_paths[idx]
         olat_cross_paths = self.olat_cross_paths[idx]
         olat_parallel_paths = self.olat_parallel_paths[idx]
-        olat_omega_i_dirs = self.olat_omega_i_dirs[idx]
-        olat_omega_i_rgbs = self.olat_omega_i_rgbs[idx]
+        olat_omega_i_dirs = self.olat_wi_dirs[idx]
+        olat_omega_i_rgbs = self.olat_wi_rgbs[idx]
         albedo_path = self.albedo_paths[idx]
         normal_path = self.normal_paths[idx]
         specular_path = self.specular_paths[idx]
@@ -521,8 +531,8 @@ class LightstageDataset(Dataset):
         example['static_path'] = self.static_paths[idx]
         example['cross_path'] = self.olat_cross_paths[idx]
         example['parallel_path'] = self.olat_parallel_paths[idx]
-        example['olat_omega_i_dirs'] = self.olat_omega_i_dirs[idx]
-        example['olat_omega_i_rgbs'] = self.olat_omega_i_rgbs[idx]
+        example['olat_omega_i_dirs'] = self.olat_wi_dirs[idx]
+        example['olat_omega_i_rgbs'] = self.olat_wi_rgbs[idx]
         example['albedo_path'] = self.albedo_paths[idx]
         example['normal_path'] = self.normal_paths[idx]
         example['specular_path'] = self.specular_paths[idx]
@@ -548,7 +558,7 @@ class LightstageDataset(Dataset):
         # load image data
         static = imageio.imread(static_path)
         albedo = imageio.imread(albedo_path)
-        normal = imageio.imread(normal_path)
+        normal_c2w = imageio.imread(normal_path)
         specular = imageio.imread(specular_path)
         sigma = imageio.imread(sigma_path)
         mask = imageio.imread(mask_path) if mask_path else (np.ones_like(static[:,:,0], dtype=np.int8) * 255) # mask is optional, use ones if not exist
@@ -556,12 +566,12 @@ class LightstageDataset(Dataset):
         # normalize to [0,1], except normal which is [-1,1]
         static = static if '.exr' in static_path else static / 255.0
         albedo = albedo if '.exr' in albedo_path else albedo / 255.0 * 4. # albedo is too dark
-        normal = normal if '.exr' in normal_path else (normal / 255.0) * 2.0 - 1.0 # normal is [0, 1] in png, convert to [-1, 1]
+        normal_c2w = normal_c2w if '.exr' in normal_path else (normal_c2w / 255.0) * 2.0 - 1.0 # normal is [0, 1] in png, convert to [-1, 1]
         specular = specular if '.exr' in specular_path else specular / 255.0
         sigma = sigma if '.exr' in sigma_path else sigma / 255.0
         mask = mask / 255.0
         
-        normal = normal / np.linalg.norm(normal, axis=-1, keepdims=True) # renormalize
+        normal_c2w = normal_c2w / np.linalg.norm(normal_c2w, axis=-1, keepdims=True) # renormalize
         
         # get olat_cross
         cross = []
@@ -569,14 +579,15 @@ class LightstageDataset(Dataset):
         irradiance = []
         parallel_stacked = []   
         for i in range(self.lighting_augmentation_pair_n):
+            olat_img_scalar = self.olat_img_intensity[self.lighting_augmentation]
             crosses = [imageio.imread(cross_path_) for cross_path_ in olat_cross_paths[i]]
             parallels = [imageio.imread(parallel_path_) for parallel_path_ in olat_parallel_paths[i]]
-            crosses = [cross if '.exr' in olat_cross_paths[i][j] else cross / 255.0 * self.olat_img_scalar for j, cross in enumerate(crosses)]
-            parallels = [parallel if '.exr' in olat_parallel_paths[i][j] else parallel / 255.0 * self.olat_img_scalar for j, parallel in enumerate(parallels)]
+            crosses = [cross if '.exr' in olat_cross_paths[i][j] else cross / 255.0 * olat_img_scalar for j, cross in enumerate(crosses)]
+            parallels = [parallel if '.exr' in olat_parallel_paths[i][j] else parallel / 255.0 * olat_img_scalar for j, parallel in enumerate(parallels)]
             cross.append(np.einsum('nhwc,nc->hwc', np.stack(crosses, axis=0), olat_omega_i_rgbs[i])) # weighted sum on cross olat images
             parallel.append(np.einsum('nhwc,nc->hwc', np.stack(parallels, axis=0), olat_omega_i_rgbs[i])) # weighted sum on parallel olat images
-            nDotL = np.einsum('nc,hwc->nhw', np.stack(olat_omega_i_dirs[i], axis=0), normal) # (n, h, w)
-            irradiance.append(np.einsum('nhw,nc->hwc', np.maximum(nDotL, 0.0), olat_omega_i_rgbs[i]) / len(olat_omega_i_rgbs[i])) # (h, w, c), use cross weights as they are usually positive
+            nDotL = np.einsum('nc,hwc->nhw', np.stack(olat_omega_i_dirs[i], axis=0), normal_c2w) # (n, h, w)
+            irradiance.append(np.einsum('nhw,nc->hwc', np.maximum(nDotL, 0.0), olat_omega_i_rgbs[i])) # (h, w, c), use cross weights as they are usually positive
             if '-random' in self.lighting_augmentation:
                 # remove the first one as the first one is usually over exposed
                 parallel_stacked.append(np.hstack(parallels[1:]) if len(parallels) > 2 else parallels[0])
@@ -610,7 +621,7 @@ class LightstageDataset(Dataset):
         cross = np.nan_to_num(cross)
         parallel = np.nan_to_num(parallel)
         albedo = np.nan_to_num(albedo)
-        normal = np.nan_to_num(normal)
+        normal_c2w = np.nan_to_num(normal_c2w)
         specular = np.nan_to_num(specular)
         sigma = np.nan_to_num(sigma)
         irradiance = np.nan_to_num(irradiance)
@@ -618,12 +629,12 @@ class LightstageDataset(Dataset):
 
         # swap x and z to align with the lotus/rgb2x
         # TODO: check rotation matrix as well
-        normal[:,:,0] *= -1.
-        # normal = normal[:, :, [2, 1, 0]]
-        # normal_w2c = normal_w2c[:, :, [2, 1, 0]]
+        normal_rgb2x_c2w = normal_c2w.copy()
+        normal_rgb2x_c2w[:,:,0] *= -1.
         
         # normal is world space normal, transform it to camera space
-        normal_w2c = np.einsum('ij, hwi -> hwj', R, normal)
+        normal_w2c = np.einsum('ij, hwi -> hwj', R, normal_c2w)
+        normal_rgb2x_w2c = np.einsum('ij, hwi -> hwj', R, normal_rgb2x_c2w)
         
         def hdr2ldr(img):
             """
@@ -657,8 +668,10 @@ class LightstageDataset(Dataset):
         parallel = torch.tensor(parallel).moveaxis(3,1)
         irradiance = torch.tensor(irradiance).moveaxis(3,1)
         albedo = self.transforms(albedo)
-        normal = self.transforms(normal)
+        normal_c2w = self.transforms(normal_c2w)
         normal_w2c = self.transforms(normal_w2c)
+        normal_rgb2x_c2w = self.transforms(normal_rgb2x_c2w)
+        normal_rgb2x_w2c = self.transforms(normal_rgb2x_w2c)
         specular = self.transforms(specular)
         sigma = self.transforms(sigma)
         mask = self.transforms(mask)
@@ -670,7 +683,9 @@ class LightstageDataset(Dataset):
         example['parallel_value'] = parallel
         example['albedo_value'] = albedo
         example['normal_w2c_value'] = normal_w2c
-        example['normal_c2w_value'] = normal
+        example['normal_c2w_value'] = normal_c2w # original lightstage normal
+        example['normal_rgb2x_w2c_value'] = normal_rgb2x_w2c
+        example['normal_rgb2x_c2w_value'] = normal_rgb2x_c2w
         example['specular_value'] = specular.repeat(3, 1, 1) # repeat to 3 channels
         example['sigma_value'] = sigma
         example['irradiance_value'] = irradiance
@@ -716,11 +731,17 @@ def collate_fn_lightstage(examples):
     albedo_values = torch.stack([example['albedo_value'] for example in examples])
     albedo_values = albedo_values.to(memory_format=torch.contiguous_format).float()
 
-    normal_w2c_values = torch.stack([example['normal_w2c_value'] for example in examples])
-    normal_w2c_values = normal_w2c_values.to(memory_format=torch.contiguous_format).float()
+    normal_ls_w2c_values = torch.stack([example['normal_w2c_value'] for example in examples])
+    normal_ls_w2c_values = normal_ls_w2c_values.to(memory_format=torch.contiguous_format).float()
 
-    normal_c2w_values = torch.stack([example['normal_c2w_value'] for example in examples])
-    normal_c2w_values = normal_c2w_values.to(memory_format=torch.contiguous_format).float()
+    normal_ls_c2w_values = torch.stack([example['normal_c2w_value'] for example in examples])
+    normal_ls_c2w_values = normal_ls_c2w_values.to(memory_format=torch.contiguous_format).float()
+
+    normal_rgb2x_w2c_values = torch.stack([example['normal_rgb2x_w2c_value'] for example in examples])
+    normal_rgb2x_w2c_values = normal_rgb2x_w2c_values.to(memory_format=torch.contiguous_format).float()
+    
+    normal_rgb2x_c2w_values = torch.stack([example['normal_rgb2x_c2w_value'] for example in examples])
+    normal_rgb2x_c2w_values = normal_rgb2x_c2w_values.to(memory_format=torch.contiguous_format).float()
 
     specular_values = torch.stack([example['specular_value'] for example in examples])
     specular_values = specular_values.to(memory_format=torch.contiguous_format).float()
@@ -755,8 +776,10 @@ def collate_fn_lightstage(examples):
         "parallel_values": parallel_values,
         "parallel_values_hstacked": parallel_values_hstacked, # hstacked parallel values for visualization
         "albedo_values": albedo_values,
-        "normal_values": normal_w2c_values, # camera space normal
-        "normal_c2w_values": normal_c2w_values,
+        "normal_values": normal_rgb2x_w2c_values, # should use rgb2x w2c normal
+        "normal_c2w_values": normal_rgb2x_c2w_values,
+        "normal_ls_w2c_values": normal_ls_w2c_values, # camera space lightstage
+        "normal_ls_c2w_values": normal_ls_c2w_values,
         "specular_values": specular_values,
         "sigma_values": sigma_values,
         "irradiance_values": irradiance_values,
