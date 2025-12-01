@@ -5,6 +5,9 @@
 # export MODEL_NAME="zheng95z/rgb-to-x"
 export MODEL_NAME="zheng95z/x-to-rgb"
 
+# when set this will only contribute to prepare the result for forward rendering
+export PRETRAINED_INVERSE_MODEL_PATH="output/benchmark/train-rgb2x-lora-inverse-bsz32_cp4FR"
+
 # training dataset
 # Set environment variables based on machine name
 HOSTNAME=$(hostname)
@@ -35,13 +38,13 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=4,5
 
 # model configs
 export TIMESTEP=999
 export TASK_NAME="forward"
 
-# data augmentatoin
+# data augmentation
 export AUG_RATIO="1:1"
 export AUG_TYPE="random1"
 
@@ -49,19 +52,21 @@ export AUG_TYPE="random1"
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
-export VAL_STEP=500
-export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
+export VAL_STEP=1000
+export VAL_TOP_K=10
+export EVAL_STEP=20000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
-export FORWARD_RENDERING_WARMUP_STEPS=1000
-export EVALUATION_OLAT_STEPS=10000
+export FORWARD_RENDERING_WARMUP_STEPS=400000
+export EVALUATION_OLAT_STEPS=20000
 
 # output dir
-export OUTPUT_DIR="output/relighting/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}_aug_random1_eval_346olat_noAvgIrradiance_300k_x2rgb_nogamma_trainFromScratch"
+export OUTPUT_DIR="output/benchmark/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}"
 
-accelerate launch --mixed_precision="fp16" \
-  --main_process_port="13226" \
+accelerate launch --config_file=accelerate_configs/cuda_g.yaml  --mixed_precision="fp16" \
+  --main_process_port="13246" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
+  --pretrained_inverse_model_path=$PRETRAINED_INVERSE_MODEL_PATH \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \
   --resolution_hypersim=$RES_HYPERSIM \
   --train_data_dir_vkitti=$TRAIN_DATA_DIR_VKITTI \
@@ -89,6 +94,7 @@ accelerate launch --mixed_precision="fp16" \
   --task_name=$TASK_NAME \
   --timestep=$TIMESTEP \
   --validation_images=$VALIDATION_IMAGES \
+  --validation_top_k=$VAL_TOP_K \
   --evaluation_top_k=$EVAL_TOP_K \
   --validation_steps=$VAL_STEP \
   --evaluation_steps=$EVAL_STEP \
@@ -99,5 +105,4 @@ accelerate launch --mixed_precision="fp16" \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
   --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
-  --save_pred_vis \
-  --train_unet_from_scratch
+  --save_pred_vis

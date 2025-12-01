@@ -11,10 +11,10 @@ from tqdm.rich import tqdm
 from torchvision import transforms
 import cv2
 
-class LightstageTransform:
+class ObjaverseTransform:
     pass
 
-class LightstageDataset(Dataset):
+class ObjaverseDataset(Dataset):
 
     def __init__(self, split='train', tasks='', ori_aug_ratio='1:1', lighting_aug='random8', lighting_aug_pair_n = 2, eval_first_n=None, img_ext='jpg', n_rotations=1):
 
@@ -22,19 +22,18 @@ class LightstageDataset(Dataset):
         
         v = 'v1.3'
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
-        self.root_dir = '/home/jyang/data/LightStageObjectDB' # local cache, no IO bottle neck
+        self.root_dir = '/home/jyang/projects/dataCollectionObjaverse/renderings/output_dir' # local cache, no IO bottle neck
+        self.root_dir = '/home/jyang/projects/dataCollectionObjaverse/renderings/output_all'
+        # self.root_dir = '/home/jyang/projects/dataCollectionObjaverse/renderings/output_all_v2'
         self.img_ext = img_ext # 'exr' or 'jpg' # TODO: jpg need to updated to compatible with negative values, running now
         # when use exr, the evaluation results may look different to the validation due to 
-        # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
-        # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
-        # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.csv'
         meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_fitting_512_ck.csv'
         # The code `self.dataset_dir` is accessing the `dataset_dir` attribute of the current object
         # (instance) in Python. This code is typically found within a class definition where `self`
         # refers to the current instance of the class. By accessing `self.dataset_dir`, the code is
         # retrieving the value stored in the `dataset_dir` attribute of the current object.
-        self.dataset_dir = f'{self.root_dir}/datasets/{self.img_ext}/{v}/{v}_2'
-        self.cam_dir = f'{self.root_dir}/Redline/exr/{v}/{v}_2/cameras'
+        self.dataset_dir = f'{self.root_dir}/renderings/'
+        self.cam_dir = f'/home/jyang/data/LightStageObjectDB/Redline/exr/{v}/{v}_2/cameras'
         self.hdri_dir = '/home/jyang/data/lightProbe/general/jpg'
         
         self.original_augmentation_ratio = ori_aug_ratio
@@ -43,30 +42,37 @@ class LightstageDataset(Dataset):
         self.n_rotations = n_rotations # rotationo samples
         
         # load json file
-        metadata = []
-        with open(meta_data_path) as f:
-            if '.json' in meta_data_path:
-                metadata = json.load(f)
-            elif '.csv' in meta_data_path:
-                metadata = pd.read_csv(f).to_dict(orient='records')
+        metadata = []   
+        objects = list(os.scandir(self.dataset_dir))
+        for obj in objects:
+            row = {}
+            row['obj'] = obj.name
+            row['cam'] = 0
+            row['mat'] = ''
+            row['l'] = 0
+            row['res'] = 512
+            metadata.append(row)
                 
         # add a manual expansion here since the cropping's under processing
         if 'fitting' in meta_data_path:
             metadata_ = []
             expansion_counter = 0
             for row in tqdm(metadata, 'expanding metadata'):
-                cross_dir_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross')
-                paral_dir_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel')
+                cross_dir_path = os.path.join(self.dataset_dir, row["obj"], 'lighting')
+                paral_dir_path = os.path.join(self.dataset_dir, row["obj"], 'lighting')
                 
                 cross_img_path = sorted(os.listdir(cross_dir_path)) if os.path.isdir(cross_dir_path) else []
                 paral_img_path = sorted(os.listdir(paral_dir_path)) if os.path.isdir(paral_dir_path) else []
                 
+                cross_img_path = [p for p in cross_img_path if 'olat_' in p]
+                paral_img_path = [p for p in paral_img_path if 'olat_' in p]
+                
                 n_cross = len(cross_img_path)
                 n_paral = len(paral_img_path)
                 
-                if n_cross == 350 and n_paral == 350:
-                    for l in range(350//4): # half of the lights are duplicated
-                    # for l in range(10): # debug #. 
+                if n_cross == n_paral:
+                    # for l in range(350):
+                    for l in range(10): # debug #
                         row['l'] = l
                         
                         if self.original_augmentation_ratio == '1:1':
@@ -86,54 +92,46 @@ class LightstageDataset(Dataset):
                             row_['aug'] = True
                             metadata_.append(row_)
                             metadata_.append(row_)
-                        elif self.original_augmentation_ratio == '2:1':
-                            row_ = row.copy()
-                            row_['aug'] = True
-                            metadata_.append(row_)
-                            row_ = row.copy()
-                            row_['aug'] = True
-                            metadata_.append(row_)
-                            row_ = row.copy()
-                            row_['aug'] = False
-                            metadata_.append(row_)
                         else:
                             raise NotImplementedError(f'Original augmentation ratio {ori_aug_ratio} is not supported')
                         
                     expansion_counter += 1
                     
                     # add a code to add all the olat images together here to make the -random8 faster, this only need to be done once
-                    cross_olat_sum_path = cross_dir_path.replace('cross', 'cross_hdri')
-                    paral_olat_sum_path = paral_dir_path.replace('parallel', 'parallel_hdri')
-                    os.makedirs(cross_olat_sum_path, exist_ok=True)
-                    os.makedirs(paral_olat_sum_path, exist_ok=True)
+                    # cross_olat_sum_path = cross_dir_path.replace('cross', 'cross_hdri')
+                    # paral_olat_sum_path = paral_dir_path.replace('parallel', 'parallel_hdri')
+                    # os.makedirs(cross_olat_sum_path, exist_ok=True)
+                    # os.makedirs(paral_olat_sum_path, exist_ok=True)
                     
-                    hdri_list = [
-                        'allwhite'
-                    ]
+                    # hdri_list = [
+                    #     'all_white',
+                    #     "city",
+                    #     "night"
+                    # ]
                     
-                    for hdri in hdri_list:
-                        force_update = False
-                        if not os.path.isfile(os.path.join(cross_olat_sum_path, f'{hdri}.exr')) or force_update: # if the hdri file already exists, skip
-                            cross_rgbs = [imageio.imread(os.path.join(cross_dir_path, img)) for img in cross_img_path]
-                            cross_rgbs_weight = np.ones((len(cross_rgbs), 3), dtype=np.float32)
-                            cross_rgb = np.einsum('nhwc,nc->hwc', np.stack(cross_rgbs, axis=0), cross_rgbs_weight)
-                            imageio.imwrite(os.path.join(cross_olat_sum_path, f'{hdri}.exr'), cross_rgb)
+                    # for hdri in hdri_list:
+                    #     force_update = False
+                    #     if not os.path.isfile(os.path.join(cross_olat_sum_path, f'{hdri}.exr')) or force_update: # if the hdri file already exists, skip
+                    #         cross_rgbs = [imageio.imread(os.path.join(cross_dir_path, img)) for img in cross_img_path]
+                    #         cross_rgbs_weight = np.ones((len(cross_rgbs), 3), dtype=np.float32)
+                    #         cross_rgb = np.einsum('nhwc,nc->hwc', np.stack(cross_rgbs, axis=0), cross_rgbs_weight)
+                    #         imageio.imwrite(os.path.join(cross_olat_sum_path, f'{hdri}.exr'), cross_rgb)
                             
-                            # save normalized cross_rgb as f'{hdri}.norm.jpg'
-                            cross_rgb_ldr = cv2.normalize(cross_rgb, None, 0, 255, cv2.NORM_MINMAX)
-                            cross_rgb_ldr = cv2.cvtColor(cross_rgb_ldr, cv2.COLOR_RGB2BGR)
-                            cv2.imwrite(os.path.join(cross_olat_sum_path, f'{hdri}.norm.jpg'), cross_rgb_ldr)
+                    #         # save normalized cross_rgb as f'{hdri}.norm.jpg'
+                    #         cross_rgb_ldr = cv2.normalize(cross_rgb, None, 0, 255, cv2.NORM_MINMAX)
+                    #         cross_rgb_ldr = cv2.cvtColor(cross_rgb_ldr, cv2.COLOR_RGB2BGR)
+                    #         cv2.imwrite(os.path.join(cross_olat_sum_path, f'{hdri}.norm.jpg'), cross_rgb_ldr)
                             
-                        if not os.path.isfile(os.path.join(paral_olat_sum_path, f'{hdri}.exr')) or force_update: # if the hdri file already exists, skip
-                            paral_rgbs = [imageio.imread(os.path.join(paral_dir_path, img)) for img in paral_img_path]
-                            paral_rgbs_weight = np.ones((len(paral_rgbs), 3), dtype=np.float32)
-                            paral_rgb = np.einsum('nhwc,nc->hwc', np.stack(paral_rgbs, axis=0), paral_rgbs_weight)
-                            imageio.imwrite(os.path.join(paral_olat_sum_path, f'{hdri}.exr'), paral_rgb.astype(np.float32))
+                    #     if not os.path.isfile(os.path.join(paral_olat_sum_path, f'{hdri}.exr')) or force_update: # if the hdri file already exists, skip
+                    #         paral_rgbs = [imageio.imread(os.path.join(paral_dir_path, img)) for img in paral_img_path]
+                    #         paral_rgbs_weight = np.ones((len(paral_rgbs), 3), dtype=np.float32)
+                    #         paral_rgb = np.einsum('nhwc,nc->hwc', np.stack(paral_rgbs, axis=0), paral_rgbs_weight)
+                    #         imageio.imwrite(os.path.join(paral_olat_sum_path, f'{hdri}.exr'), paral_rgb.astype(np.float32))
                             
-                            # save normalized paral_rgb as f'{hdri}.norm.jpg'
-                            paral_rgb_ldr = cv2.normalize(paral_rgb, None, 0, 255, cv2.NORM_MINMAX)
-                            paral_rgb_ldr = cv2.cvtColor(paral_rgb_ldr, cv2.COLOR_RGB2BGR)
-                            cv2.imwrite(os.path.join(paral_olat_sum_path, f'{hdri}.norm.jpg'), paral_rgb_ldr)
+                    #         # save normalized paral_rgb as f'{hdri}.norm.jpg'
+                    #         paral_rgb_ldr = cv2.normalize(paral_rgb, None, 0, 255, cv2.NORM_MINMAX)
+                    #         paral_rgb_ldr = cv2.cvtColor(paral_rgb_ldr, cv2.COLOR_RGB2BGR)
+                    #         cv2.imwrite(os.path.join(paral_olat_sum_path, f'{hdri}.norm.jpg'), paral_rgb_ldr)
                 else:
                     if split == 'train':
                         # print(f'Skipping {row["obj"]} at cam{row["cam"]:02d} with {n_cross} cross lights and {n_paral} parallel lights, not equal lights for training.')
@@ -146,6 +144,10 @@ class LightstageDataset(Dataset):
         self.hdri_in_olats, self.hdri_paths = self.get_hdri_in_olats(self.hdri_dir, first_n=41, n_rot=self.n_rotations) # precompute hdri to olat mapping
         # self.bbox_setting = self.init_bbox()
         
+        # rotate self.omega_i_world around z for 90 degree to cancel the blender rotaiton
+        r = _R.from_euler('x', 90, degrees=True)
+        self.omega_i_world = (self.omega_i_world @ r.as_matrix().T).astype(np.float32)
+
         self.metas = []
         self.objs = []
         self.objs_mat = []
@@ -166,7 +168,7 @@ class LightstageDataset(Dataset):
         self.mask_paths = []
         self.windows = []
         
-        print(f"Total files in LightStage dataset at {self.root_dir}: {len(metadata)}")
+        print(f"Total files in Objaverse dataset at {self.root_dir}: {len(metadata)}")
         for rowidx, row in enumerate(tqdm(metadata, desc='loading metadata')): # annoying when multi gpu
         # for rowidx, row in enumerate(metadata):
         
@@ -175,7 +177,7 @@ class LightstageDataset(Dataset):
             metadata[rowidx]['des'] = ''
         
             # general filter to remove the first 2 and last 2 lighting, since they are not OLAT sequence
-            if row['l'] <= 1 or row['l'] >= 348:
+            if row['l'] <= 1-2 or row['l'] >= 348-2:
                 # 2+346+2, 3,695,650 samples
                 continue
             
@@ -196,14 +198,14 @@ class LightstageDataset(Dataset):
                 pass
 
             # we use first 0.8 (200*0.8=160) of the data for training, and last 0.2 (200*0.2=40) for validation
-            train_eval_split = 0.8
+            train_eval_split = 0
             if split == 'train':
                 if rowidx / len(metadata) >= train_eval_split:
                     continue
                 else:
                     pass
             elif split == 'test':
-                if rowidx / len(metadata) < train_eval_split - 0.2: # add a gap of 0.2 for debugging the training and testing
+                if rowidx / len(metadata) < train_eval_split: # add a gap of 0.2 for debugging the training and testing
                 # if rowidx / len(metadata) < train_eval_split or metadata[rowidx]['obj'] != 'woodball': # debug use woodball
                     continue
                 else:
@@ -224,28 +226,29 @@ class LightstageDataset(Dataset):
             camera_path = os.path.join(self.cam_dir, f'camera{row["cam"]:02d}.txt')
             
             if 'fitting' not in meta_data_path:
-                static_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                static_cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_cross', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                static_parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_parallel', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                olat_cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{self.img_ext}')
-                olat_parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{self.img_ext}')
-                albedo_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'albedo', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                normal_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'normal', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                specular_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'specular', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                sigma_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'sigma', f'{row["i"]}_{row["j"]}.{self.img_ext}')
-                mask_path = ''
+                # static_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # static_cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_cross', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # static_parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'static_parallel', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # olat_cross_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{self.img_ext}')
+                # olat_parallel_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["i"]}_{row["j"]}.{row["l"]:06d}.{self.img_ext}')
+                # albedo_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'albedo', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # normal_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'normal', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # specular_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'specular', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # sigma_path = os.path.join(self.dataset_dir, f'{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'sigma', f'{row["i"]}_{row["j"]}.{self.img_ext}')
+                # mask_path = ''
+                pass
             else:
-                static_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static.{self.img_ext}')
-                static_cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_cross.{self.img_ext}')
-                static_parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'static_parallel.{self.img_ext}')
-                olat_cross_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{row["l"]:06d}.{self.img_ext}')
-                olat_parallel_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{row["l"]:06d}.{self.img_ext}')
-                albedo_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'albedo.{self.img_ext}')
-                normal_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'normal.{self.img_ext}')
-                specular_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'specular.{self.img_ext}')
-                sigma_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'sigma.{self.img_ext}')
-                mask_path = os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', f'mask.png')
-                
+                static_path = os.path.join(self.dataset_dir, row["obj"], 'lighting', 'all_white', f'frame_{row["cam"]+1:04d}.png')
+                static_cross_path = static_path
+                static_parallel_path = static_path
+                olat_cross_path = os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', f'frame_{row["cam"]+1:04d}.png')
+                olat_parallel_path = olat_cross_path
+                albedo_path = os.path.join(self.dataset_dir, row["obj"], 'gbuffers', 'albedo', f'Image{row["cam"]+1:04d}.exr')
+                normal_path = os.path.join(self.dataset_dir, row["obj"], 'gbuffers', 'normal', f'Image{row["cam"]+1:04d}.exr')
+                specular_path = os.path.join(self.dataset_dir, row["obj"], 'gbuffers', 'specular', f'Image{row["cam"]+1:04d}.exr')
+                sigma_path = os.path.join(self.dataset_dir, row["obj"], 'gbuffers', 'specular', f'Image{row["cam"]+1:04d}.exr')
+                mask_path = os.path.join(self.dataset_dir, row["obj"], 'gbuffers', 'mask', f'Image{row["cam"]+1:04d}.exr')
+
             # change the cross_path and parallel_path to list of paths that consists of various lighting
             # lighting_augmentation = 'random8' # 'single', 'random2', 'random4', 'hdri'
             
@@ -270,13 +273,14 @@ class LightstageDataset(Dataset):
                         olat_wi_dir.append([self.omega_i_world[random_light] for random_light in olat_random_lights])
                         olat_wi_rgb.append(olat_wi_rgb_intensity * np.ones((n_olat_compose, 3), dtype=np.float32) / N_OLATS) # use ones as the rgb weight
                         # get corresponding paths
-                        olat_random_lights = [int(x) + 2 for x in olat_random_lights] # map this actual light index to the light index in the file name
-                        olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{olat_dx:06d}.{self.img_ext}') for olat_dx in olat_random_lights])
-                        olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{olat_idx:06d}.{self.img_ext}') for olat_idx in olat_random_lights])
+                        # olat_random_lights = [int(x) + 2 for x in olat_random_lights] # map this actual light index to the light index in the file name
+                        olat_cross_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', f'frame_{row["cam"]+1:04d}.png') for random_light in olat_random_lights])
+                        olat_parallel_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', f'frame_{row["cam"]+1:04d}.png') for random_light in olat_random_lights])
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0] == str), f'cross_path should be a list of strings, got {type(olat_cross_path)}'
                     return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
                 
                 elif n_olat_compose < 0:
+                    raise NotImplementedError('Negative n random olat not implemented yet')
                     # sample n random lights from self.omega_i_world and subtract from all lights
                     n_olat_compose = -n_olat_compose
                     # itsty_scale = 0.25 # to avoid overexposure
@@ -289,10 +293,10 @@ class LightstageDataset(Dataset):
                         olat_wi_rgb.append(olat_wi_rgb_intensity * np.vstack((np.ones((1, 3), dtype=np.float32), olat_omega_i_rgb_minus))) # add one for all white
                         # get corresponding paths
                         olat_random_lights = [int(x) + 2 for x in olat_random_lights] # map this actual light index to the light index in the file name
-                        olat_cross_path_minus = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{olat_idx:06d}.{self.img_ext}') for olat_idx in olat_random_lights]
-                        olat_parallel_path_minus = [os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{olat_idx:06d}.{self.img_ext}') for olat_idx in olat_random_lights]
-                        olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross_hdri', f'allwhite.exr')] + olat_cross_path_minus)
-                        olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel_hdri', f'allwhite.exr')] + olat_parallel_path_minus)
+                        olat_cross_path_minus = [os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', 'cross', f'{random_light:06d}.{self.img_ext}') for random_light in olat_random_lights]
+                        olat_parallel_path_minus = [os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', 'parallel', f'{random_light:06d}.{self.img_ext}') for random_light in olat_random_lights]
+                        olat_cross_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', 'cross_hdri', f'allwhite.exr')] + olat_cross_path_minus)
+                        olat_parallel_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{row["l"]}', 'parallel_hdri', f'allwhite.exr')] + olat_parallel_path_minus)
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0] == str), f'cross_path should be a list of strings, got {type(olat_cross_path)}'
                     return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
                 
@@ -308,12 +312,11 @@ class LightstageDataset(Dataset):
                     # intensity_scalar = self.olat_wi_rgb_intensity['random1']
                     # olat_img_scalar = self.olat_img_intensity['random1']
                     olat_step = N_OLATS // n
-                    # for i in range(0, N_OLATS, olat_step):
                     for i in range(0, N_OLATS//2, olat_step//2):
                         olat_wi_dir.append([self.omega_i_world[i+j] for j in range(n_olat_compose)])
                         olat_wi_rgb.append(olat_wi_rgb_intensity * np.ones((1, 3), dtype=np.float32) / N_OLATS) # use ones as the rgb weight
-                        olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{i+j+2:06d}.{self.img_ext}') for j in range(n_olat_compose)])
-                        olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{i+j+2:06d}.{self.img_ext}') for j in range(n_olat_compose)])
+                        olat_cross_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{i+j}', f'frame_{row["cam"]+1:04d}.png') for j in range(n_olat_compose)])
+                        olat_parallel_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{i+j}', f'frame_{row["cam"]+1:04d}.png') for j in range(n_olat_compose)])
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0]) == str, f'cross_path should be a list of strings, got {type(olat_cross_path)}'
                     return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
                     
@@ -337,8 +340,8 @@ class LightstageDataset(Dataset):
                     hdri_rgb = hdri_rgb[olat_selected]
                     olat_wi_dir.append(hdri_ls)
                     olat_wi_rgb.append(olat_wi_rgb_intensity * hdri_rgb / N_OLATS) # use ones as the rgb weight
-                    olat_cross_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'cross', f'{olat_idx+2:06d}.{self.img_ext}') for olat_idx in olat_selected])
-                    olat_parallel_path.append([os.path.join(self.dataset_dir, f'fit_{row["res"]}', row["obj"], f'cam{row["cam"]:02d}', 'parallel', f'{olat_idx+2:06d}.{self.img_ext}') for olat_idx in olat_selected])
+                    olat_cross_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{olat_idx}', f'frame_{row["cam"]+1:04d}.png') for olat_idx in olat_selected])
+                    olat_parallel_path.append([os.path.join(self.dataset_dir, row["obj"], 'lighting', f'olat_{olat_idx}', f'frame_{row["cam"]+1:04d}.png') for olat_idx in olat_selected])
                     assert type(olat_cross_path) == list and type(olat_cross_path[0]) == list and type(olat_cross_path[0][0]) == str, f'cross_path should be a list of strings, got {type(olat_cross_path)}'
                 
                 return olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb
@@ -355,20 +358,18 @@ class LightstageDataset(Dataset):
                 'hdri4_olat20': 100.0,
                 'hdri20_olat20': 100.0,
                 'hdri40_olat20': 100.0,
-                'random1+hdri_olat20': 100.0,
             } # this factor controls the light source brightness, the higher the brighter
             self.olat_img_intensity = {
                 'random1': 80.0,
                 'random2': 40.0,
                 'random8': 20.0,
                 'random16': 5.0,
-                'fixed4_via1': 80.0,
-                'fixed20_via1': 80.0,
-                'fixed40_via1': 80.0,
-                'hdri4_olat20': 20.0,
-                'hdri20_olat20': 20.0,
-                'hdri40_olat20': 20.0,
-                'random1+hdri_olat20': 20.0,
+                'fixed4_via1': 15.0,
+                'fixed20_via1': 15.0,
+                'fixed40_via1': 15.0,
+                'hdri4_olat20': 10.0,
+                'hdri20_olat20': 10.0,
+                'hdri40_olat20': 10.0,
             } # this factor controls the image brightness, the higher the brighter
             if self.lighting_augmentation.startswith('random') and '_' not in self.lighting_augmentation:
                 n_olat_compose = int(self.lighting_augmentation.replace('random', ''))
@@ -394,30 +395,17 @@ class LightstageDataset(Dataset):
                 n_olat_compose = int(n_olat_compose.replace('olat', ''))
                 olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb = get_hdri(n_target_hdri, n_olat_compose, self.olat_wi_rgb_intensity[self.lighting_augmentation], mode='fixed')
             elif self.lighting_augmentation == 'random1+hdri_olat20':
-                n_olat_compose, n_olat_compose_ = self.lighting_augmentation.split('+')
+                n_olat_compose, n_olat_compose_ = self.lighting_augmentation.split('_')
                 
                 n_olat_compose = int(n_olat_compose.replace('random', ''))
                 n_target_olat = self.lighting_augmentation_pair_n // 2
-                olat_cross_path_random, olat_parallel_path_random, olat_wi_dir_random, olat_wi_rgb_random = get_random_olat(n_target_olat, n_olat_compose, self.olat_wi_rgb_intensity[self.lighting_augmentation])
+                olat_cross_path, olat_parallel_path, olat_wi_dir, olat_wi_rgb = get_random_olat(n_target_olat, n_olat_compose, self.olat_wi_rgb_intensity[self.lighting_augmentation])
 
                 n_target_hdri = self.lighting_augmentation_pair_n - n_target_olat
-                n_olat_compose_ = int(n_olat_compose_.replace('hdri_olat', ''))
-                olat_cross_path_hdri, olat_parallel_path_hdri, olat_wi_dir_hdri, olat_wi_rgb_hdri = get_hdri(n_target_hdri, n_olat_compose_, self.olat_wi_rgb_intensity[self.lighting_augmentation], mode='random')
-
-                # the train will fetch the first one, therefore shuffle the order
-                flip=np.random.choice([True, False])
-                if flip:
-                    olat_cross_path = olat_cross_path_hdri + olat_cross_path_random
-                    olat_parallel_path = olat_parallel_path_hdri + olat_parallel_path_random
-                    olat_wi_dir = olat_wi_dir_hdri + olat_wi_dir_random
-                    olat_wi_rgb = olat_wi_rgb_hdri + olat_wi_rgb_random
-                else:
-                    olat_cross_path = olat_cross_path_random + olat_cross_path_hdri
-                    olat_parallel_path = olat_parallel_path_random + olat_parallel_path_hdri
-                    olat_wi_dir = olat_wi_dir_random + olat_wi_dir_hdri
-                    olat_wi_rgb = olat_wi_rgb_random + olat_wi_rgb_hdri
+                n_olat_compose = int(n_olat_compose_.replace('olat', ''))
+                olat_cross_path_, olat_parallel_path_, olat_wi_dir_, olat_wi_rgb_ = get_hdri(n_target_hdri, 20, self.olat_wi_rgb_intensity[self.lighting_augmentation])
                 
-                assert len(olat_cross_path) == self.lighting_augmentation_pair_n, f'olat_cross_path length {len(olat_cross_path)} does not match lighting_augmentation_pair_n {self.lighting_augmentation_pair_n}'
+                
             else:
                 raise NotImplementedError(f'Lighting augmentation {self.lighting_augmentation} is not implemented')
             assert type(olat_cross_path) == list, f'cross_path should be a list, got {type(olat_cross_path)}'
@@ -493,7 +481,7 @@ class LightstageDataset(Dataset):
 
             # filter out the samples and crop by eval_first_n
             assert len(self.metas) == len(self.objs) == len(self.camera_paths) == len(self.static_paths) == len(self.static_cross_paths) == len(self.static_parallel_paths) == len(self.olat_cross_paths) == len(self.olat_parallel_paths) == len(self.albedo_paths) == len(self.normal_paths) == len(self.specular_paths) == len(self.sigma_paths) == len(self.mask_paths), 'Length of texts, objs, camera_paths, static_paths, cross_paths, parallel_paths, albedo_paths, normal_paths, specular_paths, sigma_paths, mask_paths are not equal'
-            cam_list = [7]
+            cam_list = [0]
             eval_idx = []
             for i, x in enumerate(self.metas):
                 if int(x['cam']) in cam_list and x['aug'] == False:
@@ -641,7 +629,7 @@ class LightstageDataset(Dataset):
     
     @staticmethod
     def get_hdri_in_olats(hdri_root, first_n=None, n_rot=1):
-
+        
         if socket.gethostname() == 'vgldgx01':
             olat_base = '/home/jyang/projects/ObjectReal/data/LSX'
         elif socket.gethostname() == 'agamemnon-ub':
@@ -659,16 +647,16 @@ class LightstageDataset(Dataset):
             
             for rot in range(0, 360-1, 360//n_rot):
                 hdri = np.roll(hdri, shift=rot, axis=1)
-                hdri_L, hdri_rgb = LightstageDataset.hdri_to_olats(hdri=hdri) # precompute the olat weights for this hdri
+                hdri_L, hdri_rgb = ObjaverseDataset.hdri_to_olats(hdri=hdri) # precompute the olat weights for this hdri
                 hdris.append((hdri_L[olat_idx-1], hdri_rgb[olat_idx-1]))
 
         return hdris, hdri_paths
-
+    
     @staticmethod
     def get_olat_hdri(olat_idx=0, sampling_mode='main', h=256, w=512):
         """This function returns a HDRI map of the given OLAT index."""
 
-        olat_base, meta = LightstageDataset.get_lightstage_config()
+        olat_base, meta = ObjaverseDataset.get_lightstage_config()
         hdri = np.zeros((h, w, 3), dtype=np.float32)
         
         if sampling_mode == 'main':
@@ -686,7 +674,7 @@ class LightstageDataset(Dataset):
         
         # calculate average color in the region
         mapping = cv2.resize(lsx_mapping.reshape((256, 512)), hdri.shape[:2][::-1]) # raise size to match hdri
-        hdri[mapping == meta['z_spiral'][olat_idx]] = 1.0 # set the region to white
+        hdri[mapping == meta['z_spiral'][olat_idx+1]] = 1.0 # set the region to white
 
         return hdri
 
@@ -694,7 +682,7 @@ class LightstageDataset(Dataset):
     def hdri_to_olats(sampling_mode='main', hdri=None):
     
         Ls, rgbs = [], []
-        olat_base, meta = LightstageDataset.get_lightstage_config()
+        olat_base, meta = ObjaverseDataset.get_lightstage_config()
             
         if sampling_mode == 'main':
             # 346 regions
@@ -709,9 +697,9 @@ class LightstageDataset(Dataset):
         # location normalization
         L = L / (np.linalg.norm(L, axis=-1, keepdims=True)+1e-8)
         
-        # rotate L to match 
         r = _R.from_euler('y', 180, degrees=True)
         L = (L @ r.as_matrix().T).astype(np.float32)
+        L = L / (np.linalg.norm(L, axis=-1, keepdims=True)+1e-8)
         
         # calculate average color in the region
         mapping = cv2.resize(lsx_mapping.reshape((256, 512)), hdri.shape[:2][::-1]) # raise size to match hdri
@@ -795,14 +783,26 @@ class LightstageDataset(Dataset):
         # omega_i = self.omega_i_world[light_index-2] # -2 to align zero-index
             
         # load image data
-        static = imageio.imread(static_path)
-        static_cross = imageio.imread(static_cross_path)
-        static_parallel = imageio.imread(static_parallel_path)
-        albedo = imageio.imread(albedo_path)
-        normal_c2w = imageio.imread(normal_path)
-        specular = imageio.imread(specular_path)
-        sigma = imageio.imread(sigma_path)
-        mask = imageio.imread(mask_path) if mask_path else (np.ones_like(static[:,:,0], dtype=np.int8) * 255) # mask is optional, use ones if not exist
+        static = imageio.imread(static_path)[...,:3]
+        static_cross = imageio.imread(static_cross_path)[...,:3]
+        static_parallel = imageio.imread(static_parallel_path)[...,:3]
+        albedo = imageio.imread(albedo_path)[...,:3]
+        normal_c2w = imageio.imread(normal_path)[...,:3]
+        normal_w2c = imageio.imread(normal_path.replace('output_all', 'output_all_v2_1frame_1lighting').replace('/normal/', '/normal_w2c/'))[...,:3]
+        specular = imageio.imread(specular_path)[...,:1]
+        sigma = imageio.imread(sigma_path)[...,:3]
+        mask = albedo[...,-1] if mask_path else (np.ones_like(static[:,:,0], dtype=np.int8) * 255) # mask is optional, use ones if not exist
+        
+        # resize to 512x512
+        # static = cv2.resize(static, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # static_cross = cv2.resize(static_cross, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # static_parallel = cv2.resize(static_parallel, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # albedo = cv2.resize(albedo, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # normal_c2w = cv2.resize(normal_c2w, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # normal_w2c = cv2.resize(normal_w2c, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # specular = cv2.resize(specular, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # sigma = cv2.resize(sigma, (512, 512), interpolation=cv2.INTER_LINEAR)
+        # mask = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
         
         # normalize to [0,1], except normal which is [-1,1]
         static = static if '.exr' in static_path else static / 255.0
@@ -810,21 +810,23 @@ class LightstageDataset(Dataset):
         static_parallel = static_parallel if '.exr' in static_parallel_path else static_parallel / 255.0
         albedo = albedo if '.exr' in albedo_path else albedo / 255.0 * np.pi # albedo is too dark
         normal_c2w = normal_c2w if '.exr' in normal_path else (normal_c2w / 255.0) * 2.0 - 1.0 # normal is [0, 1] in png, convert to [-1, 1]
+        normal_w2c = normal_w2c if '.exr' in normal_path else (normal_c2w / 255.0) * 2.0 - 1.0 
         specular = specular if '.exr' in specular_path else specular / 255.0 * np.pi * 2.0 # specular is too dark
         sigma = sigma if '.exr' in sigma_path else sigma / 255.0
-        mask = mask / 255.0
-        
-        normal_c2w = normal_c2w / np.linalg.norm(normal_c2w, axis=-1, keepdims=True) # renormalize
+        mask = mask / 1.0
+
+        normal_c2w = normal_c2w / (np.linalg.norm(normal_c2w, axis=-1, keepdims=True) + 1e-8) # renormalize
+        normal_w2c = normal_w2c / (np.linalg.norm(normal_w2c, axis=-1, keepdims=True) + 1e-8) # renormalize
         
         # get olat_cross
         cross = []
         parallel = []
         irradiance = []
-        parallel_stacked = []
+        parallel_stacked = []   
         for i in range(len(olat_cross_paths)):
             olat_img_scalar = self.olat_img_intensity[self.lighting_augmentation]
-            crosses = [imageio.imread(cross_path_) for cross_path_ in olat_cross_paths[i]]
-            parallels = [imageio.imread(parallel_path_) for parallel_path_ in olat_parallel_paths[i]]
+            crosses = [imageio.imread(cross_path_)[...,:3] for cross_path_ in olat_cross_paths[i]]
+            parallels = [imageio.imread(parallel_path_)[...,:3] for parallel_path_ in olat_parallel_paths[i]]
             crosses = [cross if '.exr' in olat_cross_paths[i][j] else cross / 255.0 * olat_img_scalar for j, cross in enumerate(crosses)]
             parallels = [parallel if '.exr' in olat_parallel_paths[i][j] else parallel / 255.0 * olat_img_scalar for j, parallel in enumerate(parallels)]
             cross.append(np.einsum('nhwc,nc->hwc', np.stack(crosses, axis=0), olat_omega_i_rgbs[i])) # weighted sum on cross olat images
@@ -839,13 +841,7 @@ class LightstageDataset(Dataset):
         cross = np.stack(cross) if len(cross) > 1 else cross[0] # (n, h, w, c)
         parallel = np.stack(parallel) if len(parallel) > 1 else parallel[0]
         irradiance = np.stack(irradiance) if len(irradiance) > 1 else irradiance[0]
-        
-        parallel_stacked_max_shape = np.max([np.array(a.shape) for a in parallel_stacked], axis=0)
-        parallel_stacked = np.vstack([
-            np.pad(a, [(0, m - s) for s, m in zip(a.shape, parallel_stacked_max_shape)], mode='constant')
-            for a in parallel_stacked
-        ]) if len(parallel_stacked) > 1 else parallel_stacked[0]  # for visualization purpose
-        # parallel_stacked = np.vstack(parallel_stacked) if len(parallel_stacked) > 1 else parallel_stacked[0] # for visualization purpose
+        parallel_stacked = np.vstack(parallel_stacked) if len(parallel_stacked) > 1 else parallel_stacked[0] # for visualization purpose
         
         # hdr to ldr via Apply simple Reinhard tone mapping
         # static = self.tonemap.process(static)
@@ -865,7 +861,6 @@ class LightstageDataset(Dataset):
         cross = (cross - 0.5) * 2.0
         parallel = (parallel - 0.5) * 2.0
         albedo = (albedo - 0.5) * 2.0
-        normal_c2w = normal_c2w # normal is already in [-1, 1]
         specular = (specular - 0.5) * 2.0
         sigma = (sigma - 0.5) * 2.0
         irradiance = (irradiance - 0.5) * 2.0 # matching that in the rgb2x pipeline
@@ -878,6 +873,7 @@ class LightstageDataset(Dataset):
         parallel = np.nan_to_num(parallel)
         albedo = np.nan_to_num(albedo)
         normal_c2w = np.nan_to_num(normal_c2w)
+        normal_w2c = np.nan_to_num(normal_w2c)
         specular = np.nan_to_num(specular)
         sigma = np.nan_to_num(sigma)
         irradiance = np.nan_to_num(irradiance)
@@ -889,7 +885,6 @@ class LightstageDataset(Dataset):
         normal_rgb2x_c2w[:,:,0] *= -1.
         
         # normal is world space normal, transform it to camera space
-        normal_w2c = np.einsum('ij, hwi -> hwj', R, normal_c2w)
         normal_rgb2x_w2c = normal_w2c.copy()
         normal_rgb2x_w2c[:,:,0] *= -1.
         
@@ -946,14 +941,14 @@ class LightstageDataset(Dataset):
         example['specular_value'] = specular.repeat(3, 1, 1) # repeat to 3 channels
         example['sigma_value'] = sigma
         example['irradiance_value'] = irradiance
-        example['mask_value'] = mask
+        example['mask_value'] = mask.bool()
         example['augmented'] = augmented
         example['parallel_value_hstacked'] = parallel_stacked
         
         return example
     
     
-def collate_fn_lightstage(examples):
+def collate_fn_objaverse(examples):
     # meta
     metas = [example['meta'] for example in examples]
     objs = [example['obj_name'] for example in examples]
@@ -1025,12 +1020,6 @@ def collate_fn_lightstage(examples):
     pixel_values = torch.stack([example['static_value'] if not example['augmented'] else example['parallel_value'][0] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
     
-    pixel_cross_values = torch.stack([example['static_cross_value'] if not example['augmented'] else example['cross_value'][0] for example in examples])
-    pixel_cross_values = pixel_cross_values.to(memory_format=torch.contiguous_format).float()
-    
-    pixel_parallel_values = torch.stack([example['static_parallel_value'] if not example['augmented'] else example['parallel_value'][0] for example in examples])
-    pixel_parallel_values = pixel_parallel_values.to(memory_format=torch.contiguous_format).float()
-    
     # get corresponding irradiance values
     pixel_irradiance_values = torch.stack([torch.ones_like(example['irradiance_value'][0]) if not example['augmented'] else example['irradiance_value'][0] for example in examples])
     pixel_irradiance_values = pixel_irradiance_values.to(memory_format=torch.contiguous_format).float()
@@ -1043,8 +1032,6 @@ def collate_fn_lightstage(examples):
         # "pixel_values": static_values, # hack
         "pixel_values": pixel_values, # mixed static and parallel values based on augmentation
         "pixel_irradiance_values": pixel_irradiance_values, # irradiance corresponding to the pixel values
-        'pixel_cross_values': pixel_cross_values,
-        'pixel_parallel_values': pixel_parallel_values,
         "static_values": static_values,
         "static_cross_values": static_cross_values,
         "static_parallel_values": static_parallel_values,
@@ -1057,10 +1044,10 @@ def collate_fn_lightstage(examples):
         "normal_ls_w2c_values": normal_ls_w2c_values, # camera space lightstage
         "normal_ls_c2w_values": normal_ls_c2w_values,
         "specular_values": specular_values,
-        "sigma_values": sigma_values,
+        # "sigma_values": sigma_values,
         "irradiance_values": irradiance_values,
         "valid_mask_values": mask_values,
-        "noise_values": torch.randn_like(pixel_values), # for diffusion model training
+        # "noise_values": torch.randn_like(pixel_values), # for diffusion model training
         # paths
         "metas": metas,
         "objs": objs,

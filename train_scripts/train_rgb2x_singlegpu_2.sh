@@ -34,25 +34,25 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=5
 
 # model configs
 export TIMESTEP=999
-# export TASK_NAME="albedo"
-export TASK_NAME="inverse"
+# export TASK_NAME="normal"
+export TASK_NAME="cross"
 
 # data augmentation
 export AUG_RATIO="1:1"
-export AUG_TYPE="random1"
+export AUG_TYPE="random8"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
-export VAL_STEP=1000
+export VAL_STEP=500
 export VAL_TOP_K=10
-export EVAL_STEP=50000 # need to be integer multiple of VAL_STEP
-export EVAL_TOP_K=80
+export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
+export EVAL_TOP_K=5
 export FORWARD_RENDERING_WARMUP_STEPS=400000 # disable warmup
 export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 
@@ -60,8 +60,8 @@ export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}"
 
 # add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
-accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
-  --main_process_port="13226" \
+accelerate launch --mixed_precision="fp16" \
+  --main_process_port="13236" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \

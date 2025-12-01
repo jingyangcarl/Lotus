@@ -100,9 +100,9 @@ def load_image(img_path):
         photo = load_ldr_image(img_path, from_srgb=False)
         
         # if resolution is over 1k, downsample to less than 1k
-        if photo.shape[1] > 512: # photo in shape 3, H, W
-            downsize = 512 / photo.shape[1]
-            photo = torchvision.transforms.Resize((int(photo.shape[1] * downsize), int(photo.shape[2] * downsize)))(photo)
+        # if photo.shape[1] > 512: # photo in shape 3, H, W
+        #     downsize = 512 / photo.shape[1]
+        #     photo = torchvision.transforms.Resize((int(photo.shape[1] * downsize), int(photo.shape[2] * downsize)))(photo)
 
     return photo
         
@@ -110,18 +110,25 @@ def load_image(img_path):
 def rgb2x(
     img_path,
     pipeline,
-    accelerator,
-    generator,
+    accelerator = None,
+    generator = None,
     inference_step = 50,
     num_samples = 1,
     img_rgb = None,
+    required_aovs = ["albedo", "normal", "roughness", "metallic", "irradiance", "specular", "cross", "parallel"]
 ):
-    # generator = torch.Generator(device="cuda").manual_seed(seed)
+    if generator is None:
+        generator = torch.Generator(device="cuda")
+        
+    if accelerator is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = accelerator.device
     
     if img_rgb is None:
-        photo = load_image(img_path).to(accelerator.device)
+        photo = load_image(img_path).to(device)
     else:
-        photo = img_rgb.to(accelerator.device)
+        photo = img_rgb.to(device)
 
     # Check if the width and height are multiples of 8. If not, crop it using torchvision.transforms.CenterCrop
     old_height, old_width = photo.shape[1], photo.shape[2]
@@ -137,14 +144,20 @@ def rgb2x(
 
     photo = torchvision.transforms.Resize((new_height, new_width))(photo)
 
-    required_aovs = ["albedo", "normal", "roughness", "metallic", "irradiance"]
     prompts = {
         "albedo": "Albedo (diffuse basecolor)",
         "normal": "Camera-space Normal",
         "roughness": "Roughness",
         "metallic": "Metallicness",
         "irradiance": "Irradiance (diffuse lighting)",
+        
+        "specular": "Specular Albedo",
+        "cross": "Cross Polarization",
+        "parallel": "Parallel Polarization"
     }
+    
+    # remove aovs not in required_aovs
+    prompts = {k: v for k, v in prompts.items() if k in required_aovs}
 
     return_list = []
     for i in tqdm(range(num_samples), desc="Running Pipeline", leave=False):
@@ -190,35 +203,43 @@ def x2rgb(
     img_metallic = None,
     img_irradiance = None,
 ):
-    if img_rgb is None:
-        rgb_image = load_image(rgb_path).to(accelerator.device)
+    if generator is None:
+        generator = torch.Generator(device="cuda")
+        
+    if accelerator is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
-        rgb_image = img_rgb.to(accelerator.device)
+        device = accelerator.device
+        
+    if img_rgb is None:
+        rgb_image = load_image(rgb_path).to(device)
+    else:
+        rgb_image = img_rgb.to(device)
 
     if img_albedo is None:
-        albedo_image = load_image(albedo_path).to(accelerator.device)
+        albedo_image = load_image(albedo_path).to(device)
     else:
-        albedo_image = img_albedo.to(accelerator.device)
+        albedo_image = img_albedo.to(device)
 
     if img_normal is None:
-        normal_image = load_image(normal_path).to(accelerator.device)
+        normal_image = load_image(normal_path).to(device)
     else:
-        normal_image = img_normal.to(accelerator.device)
+        normal_image = img_normal.to(device)
 
     if img_roughness is None:
-        roughness_image = load_image(roughness_path).to(accelerator.device)
+        roughness_image = load_image(roughness_path).to(device)
     else:
-        roughness_image = img_roughness.to(accelerator.device)
+        roughness_image = img_roughness.to(device)
 
     if img_metallic is None:
-        metallic_image = load_image(metallic_path).to(accelerator.device)
+        metallic_image = load_image(metallic_path).to(device)
     else:
-        metallic_image = img_metallic.to(accelerator.device)
+        metallic_image = img_metallic.to(device)
 
     if img_irradiance is None:
-        irradiance_image = load_image(irradiance_path).to(accelerator.device)
+        irradiance_image = load_image(irradiance_path).to(device)
     else:
-        irradiance_image = img_irradiance.to(accelerator.device)
+        irradiance_image = img_irradiance.to(device)
 
     # Set default height and width
     old_height, old_width = albedo_image.shape[1], albedo_image.shape[2]
@@ -291,10 +312,17 @@ def run_rgb2x_example_validation(
     num_samples = 1,
     model_alias = 'model'
 ):
-    
+
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
     validation_images = validation_images[:args.validation_top_k] if args.validation_top_k > 0 else validation_images
+    
+    # check if results is already generated
+    # this function will be called multiple times during the inference, therefore skip if already done
+    val_path = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}')
+    if os.path.isdir(val_path) and len(os.listdir(val_path)) >= len(validation_images) * num_samples:
+        print(f"Skip rgb2x quick eval at step {step} for {model_alias}, already exists.")
+        return
     
     pred_annos = []
     input_images = []
@@ -353,8 +381,25 @@ def run_x2rgb_example_validation(
     generator,
     inference_step = 50,
     num_samples = 1,
-    model_alias = 'model'
+    model_alias = 'model',
+    inverse_model_alias = 'inverse_model',
 ):
+    out_path = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val')
+    model_alias_ = model_alias if inverse_model_alias == '' else f'{model_alias}_via_{inverse_model_alias}'
+    
+    if not inverse_model_alias or inverse_model_alias == 'gt':
+        print("Skip x2rgb quick eval for gt model due to missing input for in-the-wild images.")
+        return
+    if os.path.exists(os.path.join(out_path, f'{model_alias_}.jpg')):
+        print(f"Skip x2rgb quick eval at step {step} for {model_alias_}, already exists.")
+        return
+    
+    rgb2x_save_dir = os.path.join(args.output_dir, 'eval', f'step00000', 'quick_val', inverse_model_alias)
+    if not os.path.exists(rgb2x_save_dir):
+        print('Skip x2rgb quick eval due to missing rgb2x results at ', rgb2x_save_dir)
+        print('Please run rgb2x evaluation first.')
+        return
+    print('loading from ', rgb2x_save_dir)
     
     validation_images = glob(os.path.join(args.validation_images, "*.jpg")) + glob(os.path.join(args.validation_images, "*.png"))
     validation_images = sorted(validation_images)
@@ -369,33 +414,74 @@ def run_x2rgb_example_validation(
 
     with distributed_state.split_between_processes(validation_images) as validation_batch:
         for i in tqdm(range(len(validation_batch)), desc=f"x2rgb quick_eval on {distributed_state.device}"):
-            rgb2x_save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val', model_alias.replace('x2rgb', 'rgb2x'))
             img_rgb = load_image(validation_batch[i]).to(accelerator.device)
             img_blk = torch.zeros_like(img_rgb) # fill empty channels with black matching the training setting
             img_wht = torch.ones_like(img_rgb)
-            gbuffer, preds, prompts = x2rgb(
-                validation_batch[i],
-                os.path.join(rgb2x_save_dir, f'{i:02d}_albedo.jpg'),
-                os.path.join(rgb2x_save_dir, f'{i:02d}_normal.jpg'),
-                '', '', '', # no roughness, metallic, irradiance
-                # os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
-                # os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
-                # os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
-                'static',
-                pipeline,
-                accelerator,
-                generator,
-                inference_step, 
-                num_samples,
-                img_roughness=img_blk,
-                img_metallic=img_blk,
-                img_irradiance=img_wht,
-            )
+            if task == "forward_gbuffer":
+                gbuffer, preds, prompts = x2rgb(
+                    validation_batch[i],
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_albedo.jpg'),
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_normal.jpg'),
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_specular.jpg'), # use specular here through the roughness channel. this should work as long as it matches training
+                    '', '', # no metallic, irradiance
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
+                    'static',
+                    pipeline,
+                    accelerator,
+                    generator,
+                    inference_step, 
+                    num_samples,
+                    img_metallic=img_blk,
+                    img_irradiance=img_wht,
+                )
+            elif task == "forward_gbuffer_albedo_only":
+                gbuffer, preds, prompts = x2rgb(
+                    validation_batch[i],
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_albedo.jpg'),
+                    '', # no normal
+                    '', # no roughness
+                    '', '', # no metallic, irradiance
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_normal.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
+                    'static',
+                    pipeline,
+                    accelerator,
+                    generator,
+                    inference_step, 
+                    num_samples,
+                    img_normal=img_blk,
+                    img_roughness=img_blk,
+                    img_metallic=img_blk,
+                    img_irradiance=img_wht,
+                )
+            elif task == "forward_polarization":
+                gbuffer, preds, prompts = x2rgb(
+                    validation_batch[i],
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_cross.jpg'),
+                    os.path.join(rgb2x_save_dir, f'{i:02d}_parallel.jpg'),
+                    '', '', '', # no roughness, metallic, irradiance
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_roughness.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_metallic.jpg'),
+                    # os.path.join(rgb2x_save_dir, f'{i:02d}_irradiance.jpg'),
+                    'static',
+                    pipeline,
+                    accelerator,
+                    generator,
+                    inference_step, 
+                    num_samples,
+                    img_roughness=img_blk,
+                    img_metallic=img_blk,
+                    img_irradiance=img_wht,
+                )
 
             for j, (pred, prompt) in enumerate(zip(preds, prompts)):
                 pred_annos.append(pred[0])
-                        
-                pred_outpath = os.path.join(args.output_dir, 'eval', f'step{step:05d}', 'quick_val', f'{model_alias}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
+
+                pred_outpath = os.path.join(out_path, f'{model_alias_}', f'{os.path.basename(validation_batch[i]).split(".")[0]}_{prompt}.jpg')
                 os.makedirs(os.path.dirname(pred_outpath), exist_ok=True)
                 pred[0].save(pred_outpath)
             
@@ -419,11 +505,11 @@ def run_x2rgb_example_validation(
     save_output = concatenate_images(input_images, *pred_annos if isinstance(pred_annos[0], list) else pred_annos)
     save_dir = os.path.join(args.output_dir,'eval', f'step{step:05d}', 'quick_val')
     os.makedirs(save_dir, exist_ok=True)
-    save_output.save(os.path.join(save_dir, f'{model_alias}.jpg'))
+    save_output.save(os.path.join(save_dir, f'{model_alias_}.jpg'))
 
-def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=10, model_alias=''):
+def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=10, model_alias='', inverse_model_alias=''):
 
-    if step >= 0 and step % args.evaluation_steps == 0:
+    if step > 0 and step % args.evaluation_steps == 0:
         test_data_dir = os.path.join(args.base_test_data_dir, task)
         dataset_split_path = "evaluation/dataset_brdf"
         eval_datasets = [('lightstage', 'test')]
@@ -441,9 +527,8 @@ def run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval
         eval_metrics = evaluation_material(eval_dir, test_data_dir, dataset_split_path, eval_mode="generate_prediction", 
                                                 gen_prediction=gen_prediction, pipeline=pipeline, accelerator=accelerator, generator=generator, 
                                                 eval_datasets=eval_datasets,
-                                                save_pred_vis=args.save_pred_vis, args=args, task=task, model_alias=model_alias)
-        
-    
+                                                save_pred_vis=args.save_pred_vis, args=args, task=task, model_alias=model_alias, inverse_model_alias=inverse_model_alias)
+
 def gen_lotus_normal(img_path, pipe, accelerator, prompt="", num_inference_steps=1):
     if torch.backends.mps.is_available():
             autocast_ctx = nullcontext()
@@ -737,8 +822,8 @@ def run_evaluation(pipeline, task, args, step, accelerator):
                 raise ValueError(f"Not Supported Task: {task}!")
 
 def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, eval_first_n=10, unet_fr=None):
-    logger.info("Running validation for task: %s... " % args.task_name[0])
     task = args.task_name[0]
+    logger.info("Running validation for task: %s... " % task)
 
     if args.seed is None:
         generator = None
@@ -755,7 +840,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         # unet.disable_adapters()
         # pass
 
-    def wrap_pipeline_lotus(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
+    def wrap_pipeline_lotus(pretrained_model_name_or_path, unet, task, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
 
         if reload_pretrained_unet:
             # reloading unet to preserver the pretrained results
@@ -814,7 +899,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         else:
             pass
 
-    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
+    def wrap_pipeline_rgb2x(pretrained_model_name_or_path, unet, task, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
 
         if reload_pretrained_unet:
             # reloading unet to preserver the pretrained results
@@ -833,7 +918,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             # use the finetuned unet
             pass
 
-        if unet is not None:
+        if 'output/' not in pretrained_model_name_or_path:
             pipeline = StableDiffusionAOVMatEstPipeline.from_pretrained(
                 pretrained_model_name_or_path,
                 vae=accelerator.unwrap_model(vae),
@@ -864,7 +949,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
-            # run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
             pass
 
         del pipeline
@@ -879,7 +964,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         else:
             pass
         
-    def wrap_pipeline_x2rgb(pretrained_model_name_or_path, unet, model_alias='model', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
+    def wrap_pipeline_x2rgb(pretrained_model_name_or_path, unet, task, model_alias='model', inverse_model_alias='', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False):
 
         if reload_pretrained_unet:
             # reloading unet to preserver the pretrained results
@@ -919,11 +1004,11 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             pipeline.enable_xformers_memory_efficient_attention()
             
         # Run example-validation
-        # run_x2rgb_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias)
+        run_x2rgb_example_validation(pipeline, task, args, step, accelerator, generator, model_alias=model_alias, inverse_model_alias=inverse_model_alias)
 
         if enable_eval:
             # Note that, the results may different from the example_validation when evaluation loads exr images.
-            run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
+            run_brdf_evaluation(pipeline, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias, inverse_model_alias=inverse_model_alias)
             pass
 
         del pipeline
@@ -938,7 +1023,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         else:
             pass
 
-    def wrap_pipeline_dsine(pretrained_model_name_or_path, model_alias='model', enable_eval=False):
+    def wrap_pipeline_dsine(pretrained_model_name_or_path, task, model_alias='model', enable_eval=False):
         # https://github.com/baegwangbin/DSINE
 
         normal_predictor = torch.hub.load("hugoycj/DSINE-hub", "DSINE", trust_repo=True)
@@ -948,46 +1033,112 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if enable_eval:
             run_brdf_evaluation(normal_predictor, task, args, step, accelerator, generator, eval_first_n=eval_first_n, model_alias=model_alias)
 
-    enable_eval = True
-    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
-        assert args.task_name[0] in ['normal', 'depth'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
-        if args.use_lora:
-            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-            # wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
-        else:
-            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-
-    elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
-        assert args.task_name[0] in ['albedo', 'normal'], f"{args.pretrained_model_name_or_path} pipeline support albedo and normal estimation task."
-        if args.use_lora:
-            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
-            if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
-            # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval)
-        else:
-            wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
-            if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
-
-    elif 'zheng95z/x-to-rgb' in args.pretrained_model_name_or_path:
-        assert args.task_name[0] in ['forward'], f"{args.pretrained_model_name_or_path} pipeline support forward rendering task."
-        if args.use_lora:
-            # wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-            # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-        else:
-            # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-            wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-
+    # enable_eval = True
+    enable_eval = False # TODO, will OOM for some reason.
+    
     # generate pretrained results
     if step == 0:
-        if args.task_name == 'normal':
-            wrap_pipeline_dsine("hugoycj/DSINE-hub", model_alias='dsine', enable_eval=enable_eval)
-            wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-            wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
-        elif args.task_name == 'albedo':
-            wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+        task = args.task_name[0] # need to reset
+        tasks = [task] if task != 'inverse' else ['albedo', 'normal', 'specular', 'cross', 'parallel']
+        for task in tasks:
+            # disable the rgb2x_original as it's the same a step0 results from lora enabled and it's really heavy
+            if 'normal' == task:
+                wrap_pipeline_dsine("hugoycj/DSINE-hub", task, model_alias='dsine', enable_eval=enable_eval)
+                wrap_pipeline_lotus('jingheya/lotus-normal-g-v1-1', unet, task, model_alias='lotus_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+                # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval) # default model output
+                pass
+            elif 'albedo' == task:
+                # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+                pass
+            elif 'specular' == task:
+                # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+                pass
+            elif 'cross' == task:
+                # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+                pass
+            elif 'parallel' == task:
+                # wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+                pass
+            elif 'forward_' in task:
+                print("Generating inverse rendering results for forward rendering evaluation...")
+                # inverse rendering
+                assert len(tasks) == 1, "When testing forward rendering, we generate results from inverse first"
+                if 'forward_gbuffer' == task:
+                    inverse_tasks = ['albedo', 'normal', 'specular']
+                elif 'forward_gbuffer_albedo_only' == task:
+                    inverse_tasks = ['albedo']
+                elif 'forward_polarization' == task:
+                    inverse_tasks = ['cross', 'parallel']
+                else:
+                    raise ValueError(f"Not Supported Forward Rendering Task: {task}!")
+                for inv_task in inverse_tasks:
+                    if args.pretrained_inverse_model_path is not None:
+                        ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
+                        ckpts.sort(key=lambda x: int(x.split('checkpoint-')[-1]), reverse=True)
+                        if len(ckpts) > 0:
+                            inverse_model_name = args.pretrained_inverse_model_path.split('/')[-1].strip() + '-' + ckpts[0]
+                            wrap_pipeline_rgb2x(os.path.join(args.pretrained_inverse_model_path, ckpts[0]), unet, inv_task, model_alias=inverse_model_name, reload_pretrained_unet=True, enable_eval=enable_eval)
+                    wrap_pipeline_rgb2x('zheng95z/rgb-to-x', unet, inv_task, model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
+                
+                # forward rendering
+                print("Generating forward rendering results...")
+                wrap_pipeline_x2rgb('zheng95z/x-to-rgb', unet, task, model_alias='x2rgb_original', inverse_model_alias='rgb2x_original', reload_pretrained_unet=True, enable_eval=enable_eval)
     else:
         pass
-        
+    
+    if 'stable-diffusion-2-base' in args.pretrained_model_name_or_path or 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+        assert task in ['normal', 'albedo', 'depth', 'inverse'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
+        tasks = [task] if task != 'inverse' else ['albedo', 'normal', 'depth']
+        if args.use_lora:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, task, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+        else:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, task, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            
+    elif 'lotus-normal-g-v1-1' in args.pretrained_model_name_or_path:
+        assert task in ['normal', 'depth', 'inverse'], f"{args.pretrained_model_name_or_path} pipeline support normal and depth estimation task."
+        if args.use_lora:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, task, model_alias='lotus_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+        else:
+            wrap_pipeline_lotus(args.pretrained_model_name_or_path, unet, task, model_alias='lotus_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            
+    elif 'zheng95z/rgb-to-x' in args.pretrained_model_name_or_path:
+        assert task in ['albedo', 'normal', 'specular', 'cross', 'parallel', 'inverse'], f"{args.pretrained_model_name_or_path} pipeline support albedo and normal estimation task."
+        tasks = [task] if task != 'inverse' else ['albedo', 'normal', 'specular', 'cross', 'parallel']
+        for task in tasks:
+            if args.use_lora:
+                wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, task, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
+                if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
+                # wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, model_alias='rgb2x_finetune_lora_disable', reload_pretrained_unet=False, disable_lora_on_reference=True, enable_eval=enable_eval) # this same as original
+            else:
+                wrap_pipeline_rgb2x(args.pretrained_model_name_or_path, unet, task, model_alias='rgb2x_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=True)
+                if unet_fr is not None: wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet_fr, model_alias='x2rgb_finetune_nolora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=False)
+
+    elif 'zheng95z/x-to-rgb' in args.pretrained_model_name_or_path:
+        assert task in ['forward_gbuffer', 'forward_gbuffer_albedo_only', 'forward_polarization'], f"{args.pretrained_model_name_or_path} pipeline support forward rendering task."
+        tasks = [task]
+        for task in tasks:
+            if args.use_lora:
+                if args.pretrained_inverse_model_path is not None:
+                    # wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                    # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                    ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
+                    ckpts.sort(key=lambda x: int(x.split('checkpoint-')[-1]), reverse=True)
+                    if len(ckpts) > 0:
+                        inverse_model_name = args.pretrained_inverse_model_path.split('/')[-1].strip() + '-' + ckpts[0]
+                        wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_lora_enable', inverse_model_alias=inverse_model_name, reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_lora_enable', inverse_model_alias='rgb2x_original', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_lora_enable', inverse_model_alias='gt', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+            else:
+                # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                if args.pretrained_inverse_model_path is not None:
+                    ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
+                    ckpts.sort(key=lambda x: int(x.split('checkpoint-')[-1]), reverse=True)
+                    if len(ckpts) > 0:
+                        inverse_model_name = args.pretrained_inverse_model_path.split('/')[-1].strip() + '-' + ckpts[0]
+                        wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_nolora', inverse_model_alias=inverse_model_name, reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_nolora', inverse_model_alias='rgb2x_original', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+                wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_nolora', inverse_model_alias='gt', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
+
     # if args.use_lora:
         # https://huggingface.co/docs/diffusers/v0.28.1/api/loaders/peft
         # when using lora, remember to enable the adapters after disabling, otherwise, trainning will failed
@@ -1007,6 +1158,13 @@ def parse_args():
         default=None,
         required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--pretrained_inverse_model_path",
+        type=str,
+        default=None,
+        required=False,
+        help="Path to pretrained model or model identifier from huggingface.co/models. Only used for generating results at step0",
     )
     parser.add_argument(
         "--revision",
@@ -1129,7 +1287,14 @@ def parse_args():
         "--lightstage_original_augmentation_ratio",
         type=str,
         default="1:1",
-        choices=["1:1", "1:0", "0:1"],
+        choices=["1:1", "1:0", "0:1", "2:1"],
+    )
+    parser.add_argument(
+        "--lightstage_img_ext",
+        type=str,
+        default="jpg",
+        choices=["jpg", "exr"],
+        help="The image file extension for lightstage dataset.",
     )
     parser.add_argument(
         "--mix_dataset",
@@ -1197,6 +1362,11 @@ def parse_args():
         "--evaluation_top_k",
         type=int,
         default=10,
+    )
+    parser.add_argument(
+        "--evaluation_skip_step0",
+        action="store_true",
+        help="Whether to skip the evaluation at step0.",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
@@ -1719,6 +1889,7 @@ def main():
                             accelerator.print(f"Error: Both checkpoint loading methods failed for {model_name}: {fallback_e}")
                             
                 else:
+                    from diffusers import UNet2DConditionModel
                     # For non-LoRA models, load normally
                     try:
                         original_in_channels = model.config.in_channels if hasattr(model.config, 'in_channels') else 4
@@ -2028,21 +2199,27 @@ def main():
         dynamic_ncols=True,
     )
     
+    assert len(args.task_name) == 1
+    task_curr = args.task_name[0]
+    # if task_curr == 'forward_gbuffer' or task_curr == 'forward_polarization':
+    #     args.evaluation_skip_step0 = False # always do evaluation at step 0 for forward rendering tasks
+    
     # if accelerator.is_main_process and args.validation_images is not None:
-    if args.validation_images is not None: # enable distributed validation
-        # log_validation(
-        #     vae,
-        #     text_encoder,
-        #     tokenizer,
-        #     unet,
-        #     args,
-        #     accelerator,
-        #     weight_dtype,
-        #     global_step,
-        #     eval_first_n=args.evaluation_top_k,
-        #     unet_fr=(unet_fr if 'unet_fr' in locals() else None)
-        # )
-        pass
+    if args.validation_images is not None and not args.evaluation_skip_step0: # enable distributed validation
+        log_validation(
+            vae,
+            text_encoder,
+            tokenizer,
+            unet,
+            args,
+            accelerator,
+            weight_dtype,
+            global_step,
+            eval_first_n=args.evaluation_top_k,
+            unet_fr=(unet_fr if 'unet_fr' in locals() else None)
+        )
+    else:
+        print("Skipping validation at step 0. Usually this take a while")
             
     for epoch in range(first_epoch, args.num_train_epochs):
         progress_bar.set_description(f"Epoch {epoch + 1}/{args.num_train_epochs}")
@@ -2104,26 +2281,50 @@ def main():
                     ).latent_dist.sample() # [2B, 4, h, w]
                 rgb_latents = rgb_latents * vae.config.scaling_factor
                 # Convert target_annotations to latent space
-                assert len(args.task_name) == 1
-                if args.task_name[0] == "depth":
+                if task_curr == "depth":
                     TAR_ANNO = "depth_values"
-                elif args.task_name[0] == "normal":
+                elif task_curr == "normal":
                     assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'lotus-normal-g-v1-1', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for normal estimation'
                     TAR_ANNO = "normal_values"
-                elif args.task_name[0] == "albedo":
+                elif task_curr == "albedo":
                     assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for albedo estimation'
                     TAR_ANNO = "albedo_values"
-                elif args.task_name[0] == "forward":
-                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['x-to-rgb'], f'model {args.pretrained_model_name_or_path} not supported for forward rendering'
+                elif task_curr == "specular":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for specular estimation'
+                    TAR_ANNO = "specular_values"
+                elif task_curr == 'cross':
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for polarization estimation'
+                    # TAR_ANNO = "static_cross_values"
+                    TAR_ANNO = "pixel_cross_values"
+                elif task_curr == 'parallel':
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['stable-diffusion-2-base', 'rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for polarization estimation'
+                    # TAR_ANNO = "static_parallel_values"
+                    TAR_ANNO = "pixel_parallel_values"
+                elif task_curr == "inverse":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['rgb-to-x'], f'model {args.pretrained_model_name_or_path} not supported for inverse rendering'
+                    TAR_ANNOs = ["albedo_values", "normal_values", "specular_values", "pixel_cross_values", "pixel_parallel_values"]
+                    TAR_ANNO = random.choice(TAR_ANNOs)
+                elif task_curr == "forward_gbuffer":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['x-to-rgb'], f'model {args.pretrained_model_name_or_path} not supported for forward rendering via gbuffer data'
+                    TAR_ANNO = "pixel_values"
+                elif task_curr == "forward_gbuffer_albedo_only":
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['x-to-rgb'], f'model {args.pretrained_model_name_or_path} not supported for forward rendering via gbuffer data'
+                    TAR_ANNO = "pixel_values"
+                elif task_curr == 'forward_polarization':
+                    assert args.pretrained_model_name_or_path.split('/')[-1] in ['x-to-rgb'], f'model {args.pretrained_model_name_or_path} not supported for forward rendering via polarization'
                     TAR_ANNO = "pixel_values"
                 else:
-                    raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                    raise ValueError(f"Do not support {task_curr} yet. ")
                 
+                # this section made alignment very confusing
+                # disable for the lightstage dataset
+                # when using the hypersim dataset, if not work, need to check the dataset
                 if 'rgb-to-x' in args.pretrained_model_name_or_path:
                     # negate the x channel to adapt to the pretrained weights
                     # the adjusted normals aligns to the lotus normal space
                     if TAR_ANNO == "normal_values":
                         batch[TAR_ANNO][:, 0, :, :] *= -1 # [B, 3, h, w]
+                        pass
                     else:
                         pass
                 else:
@@ -2155,20 +2356,21 @@ def main():
                     
                     black_img = torch.zeros_like(batch["pixel_values"])
                     albedo_latents = vae.encode(batch["albedo_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    normal_latents = vae.encode(batch["normal_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    specular_latents = vae.encode(batch["specular_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    static_cross_latents = vae.encode(batch["static_cross_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                    static_parallel_latents = vae.encode(batch["static_parallel_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
                     irradiance_latents = F.interpolate(batch["pixel_irradiance_values"], size=albedo_latents.shape[-2:], mode='bilinear', align_corners=False)
-                    # normal_latents = vae.encode(batch["normal_values"].to(weight_dtype)).latent_dist.sample() * vae.config.scaling_factor
                     # black_latents = vae.encode(black_img.to(weight_dtype)).latent_dist.sample() # this cause rendering looks green
                     black_latents = torch.zeros_like(rgb_latents[:bsz_per_task])
                     black_latents_scale = black_latents * vae.config.scaling_factor
-                    gbuffer_latents = torch.cat((albedo_latents, black_latents_scale, black_latents_scale, black_latents_scale, irradiance_latents[:,:3]), dim=1) # [B, 15, h, w]
                     
-                    # black_latents = torch.zeros_like(rgb_latents[:bsz_per_task])
-                    # gbuffer_latents = vae.encode(
-                    #     torch.cat((batch["albedo_values"],batch["normal_values"]), dim=0).to(weight_dtype)
-                    # ).latent_dist.sample() # [2B, 4, h, w]
-                    # gbuffer_latents = gbuffer_latents * vae.config.scaling_factor
-                    # gbuffer_latents = torch.cat((gbuffer_latents[:bsz_per_task], gbuffer_latents[:bsz_per_task], black_latents, black_latents, black_latents[:,:3]), dim=1) # [B, 15, h, w]
-
+                    if task_curr == "forward_gbuffer":
+                        gbuffer_latents = torch.cat((albedo_latents, normal_latents, specular_latents, black_latents_scale, irradiance_latents[:,:3]), dim=1) # [B, 15, h, w]
+                    elif task_curr == "forward_gbuffer_albedo_only":
+                        gbuffer_latents = torch.cat((albedo_latents, black_latents_scale, black_latents_scale, black_latents_scale, irradiance_latents[:,:3]), dim=1) # [B, 15, h, w]
+                    elif task_curr == "forward_polarization":
+                        gbuffer_latents = torch.cat((static_cross_latents, static_parallel_latents, black_latents_scale, black_latents_scale, irradiance_latents[:,:3]), dim=1) # [B, 15, h, w]
                     target_latents = target_latents[:bsz_per_task] # [B, 4, h, w]
                     bsz = black_latents.shape[0] # update bsz to the real batch size
                 else:
@@ -2177,7 +2379,7 @@ def main():
 
                 # Get the valid mask for the latent space
                 valid_mask_for_latent = batch.get("valid_mask_values", None)
-                if args.task_name[0] == "depth" and valid_mask_for_latent is not None:
+                if task_curr == "depth" and valid_mask_for_latent is not None:
                     sky_mask_for_latent = batch.get("sky_mask_values", None)
                     valid_mask_for_latent = valid_mask_for_latent + sky_mask_for_latent
                 if valid_mask_for_latent is not None:
@@ -2254,15 +2456,35 @@ def main():
                         return_tensors="pt",
                     )
                 elif 'rgb-to-x' in args.pretrained_model_name_or_path or 'x-to-rgb' in args.pretrained_model_name_or_path:
-                    # prompt = "Albedo (diffuse basecolor)"
-                    if args.task_name[0] == "normal":
+                    if task_curr == "normal":
                         prompt = "Camera-space Normal" # checked, this is correct during the training
-                    elif args.task_name[0] == "albedo":
+                    elif task_curr == "albedo":
                         prompt = "Albedo (diffuse basecolor)" # checked, this is correct during the training
-                    elif args.task_name[0] == "forward":
+                    elif task_curr == "specular":
+                        prompt = "Specular Albedo" # not trained
+                    elif task_curr == "cross":
+                        prompt = "Cross Polarization" # not trained
+                    elif task_curr == "parallel":
+                        prompt = "Parallel Polarization" # not trained
+                    elif task_curr == "inverse":
+                        if TAR_ANNO == "normal_values":
+                            prompt = "Camera-space Normal"
+                        elif TAR_ANNO == "albedo_values":
+                            prompt = "Albedo (diffuse basecolor)"
+                        elif TAR_ANNO == "specular_values":
+                            prompt = "Specular Albedo"
+                        elif TAR_ANNO == "static_cross_values" or TAR_ANNO == "pixel_cross_values":
+                            prompt = "Cross Polarization"
+                        elif TAR_ANNO == "static_parallel_values" or TAR_ANNO == "pixel_parallel_values":
+                            prompt = "Parallel Polarization"
+                        else:
+                            raise ValueError(f"Do not support {TAR_ANNO} yet. ")
+                    elif task_curr == "forward_gbuffer" or task_curr == "forward_gbuffer_albedo_only":
+                        prompt = ""
+                    elif task_curr == "forward_polarization":
                         prompt = ""
                     else:
-                        raise ValueError(f"Do not support {args.task_name[0]} yet. ")
+                        raise ValueError(f"Do not support {task_curr} yet. ")
                     text_inputs = tokenizer(
                         prompt,
                         padding="max_length",
@@ -2350,7 +2572,7 @@ def main():
                     rgb_loss = torch.tensor(0.0).to(anno_loss.device) # no rgb loss in rgb2x
                     rgb_pair_loss = F.mse_loss(rgb_x0_pred[:bsz_per_task][valid_mask_down_anno[:bsz_per_task]].float(), rgb_x0_pred[bsz_per_task:][valid_mask_down_anno[bsz_per_task:]].float(), reduction="mean") if args.lightstage_augmentation_pair_loss_enable else 0*anno_loss
                     rendering_loss = torch.tensor(0.0).to(anno_loss.device)
-                    loss = anno_loss + rgb_loss + rgb_pair_loss
+                    loss = anno_loss + rgb_loss + rgb_pair_loss*0
                     
                     # forward renderer loss
                     if 'unet_fr' in locals() and global_step+1 >= args.forward_rendering_warmup_steps:
@@ -2521,17 +2743,17 @@ def main():
                                 safe_serialization=True,
                             )
                             
-                            if 'unet_fr' in locals():
-                                unwrapped_unet_fr = unwrap_model(unet_fr)
-                                unet_fr_lora_state_dict = convert_state_dict_to_diffusers(
-                                    get_peft_model_state_dict(unwrapped_unet_fr, adapter_name='lora_lotus_fr')
-                                )
+                            # if 'unet_fr' in locals():
+                            #     unwrapped_unet_fr = unwrap_model(unet_fr)
+                            #     unet_fr_lora_state_dict = convert_state_dict_to_diffusers(
+                            #         get_peft_model_state_dict(unwrapped_unet_fr, adapter_name='lora_lotus_fr')
+                            #     )
                                 
-                                LotusGPipeline.save_lora_weights(
-                                    save_directory=save_path,
-                                    unet_lora_layers=unet_fr_lora_state_dict,
-                                    safe_serialization=True,
-                                )
+                            #     LotusGPipeline.save_lora_weights(
+                            #         save_directory=save_path,
+                            #         unet_lora_layers=unet_fr_lora_state_dict,
+                            #         safe_serialization=True,
+                            #     )
                 
                 if global_step % validation_steps == 0:
                     
@@ -2547,7 +2769,12 @@ def main():
                         mosaics.append(batch['albedo_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
                         mosaics.append(batch['normal_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
                         mosaics.append(batch['normal_c2w_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['normal_ls_w2c_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['normal_ls_c2w_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['specular_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
                         mosaics.append(batch['static_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['static_cross_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
+                        mosaics.append(batch['static_parallel_values'].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]
                         mosaics.append(torch.ones_like(batch['static_values']).cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3], irradiance for static is not available, fill with 1
                         for j in range(batch['parallel_values'].shape[1]):
                             mosaics.append(batch['parallel_values'][:,j].cpu().numpy().transpose(0, 2, 3, 1)) # [B, h, w, 3]

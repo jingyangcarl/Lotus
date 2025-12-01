@@ -340,7 +340,7 @@ def evaluation_normal(eval_dir, base_data_dir, dataset_split_path, eval_mode="ge
                 # # import torchvision; torchvision.utils.save_image(gt_norm_mask.float(), 'gt_norm_mask.png')
                 # # breakpoint()
 
-                pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
+                pred_error = normal_utils.compute_cosine_error(pred_norm, gt_norm)
                 if total_normal_errors is None:
                     total_normal_errors = pred_error[gt_norm_mask]
                 else:
@@ -384,7 +384,7 @@ def evaluation_material(
         gen_prediction=None, pipeline=None, accelerator=None, generator=None, 
         prediction_dir=None, processing_res=None,
         eval_datasets=[('lightstage', 'test')],
-        save_pred_vis=False, args=None, task='', model_alias='model'
+        save_pred_vis=False, args=None, task='curr', model_alias='model', inverse_model_alias=''
     ):
     '''
     if eval_mode == "load_prediction": assert prediction_dir is not None
@@ -395,6 +395,7 @@ def evaluation_material(
 
     # device = torch.device('cuda')
     metric_results = {}
+    curr_task = task
     
     # distributed inference
     distributed_state = PartialState()
@@ -404,10 +405,31 @@ def evaluation_material(
         pipeline.to(distributed_state.device)
 
     for dataset_name, split in eval_datasets:
+        
+        results_dir = None
+        output_dir = os.path.join(eval_dir, dataset_name, model_alias)
+        if inverse_model_alias:
+            output_dir = os.path.join(eval_dir, dataset_name, f'{model_alias}_via_{inverse_model_alias}')
+        inverse_output_dir = os.path.join(os.path.dirname(eval_dir), f'step00000', dataset_name, inverse_model_alias) if inverse_model_alias else None
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if not inverse_model_alias or inverse_model_alias == 'gt':
+            pass
+        else:
+            if not os.path.exists(inverse_output_dir):
+                print(f'Inverse output dir {inverse_output_dir} does not exist, skip.')
+                continue
 
         if dataset_name == 'lightstage':
+            
+            # check if already exists
+            metrics_out_path = os.path.join(output_dir, f"{curr_task}_metrics.txt")
+            if os.path.exists(metrics_out_path):
+                print(f"Metrics file {metrics_out_path} already exists, skip evaluation.")
+                continue
+            
             from utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage
-            test_dataset_lightstage = LightstageDataset(split=split, tasks=task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
+            test_dataset_lightstage = LightstageDataset(split=split, tasks=curr_task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
         # print(f'Number of samples in {dataset_name} {split}: {len(samples)}')
         bsz = 1
         test_loader = DataLoader(
@@ -419,31 +441,296 @@ def evaluation_material(
             pin_memory=True
         )
         test_loader = accelerator.prepare(test_loader)
-        
-        results_dir = None
-        total_normal_errors = None
-
-        output_dir = os.path.join(eval_dir, dataset_name, model_alias)
-        os.makedirs(output_dir, exist_ok=True)
 
         if save_pred_vis:
             results_dir = os.path.join(output_dir, "vis")
             os.makedirs(results_dir, exist_ok=True)
-            print(f"Saving visualizations to {results_dir}")
+            print(f"Saving visualizations to {results_dir}/{curr_task}")
+            
+        def get_normal():
+            
+            total_normal_errors = None
+            if eval_mode == "load_prediction":
+                pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta["obj"]}_norm.png')
+                norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
+                norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
+                norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
 
+            elif eval_mode == "generate_prediction":
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img, required_aovs=['normal']) # call rgb2x
+                    norm_out = pred_ret[list(prompts_ret.keys()).index('normal')][0] # PIL
+                    norm_out = (np.asarray(norm_out).astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3]), [-1,1]
+                    norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                elif 'lotus' in model_alias:
+                    norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
+                elif 'dsine' in model_alias:
+                    # Use the model to infer the normal map from the input image
+                    with torch.inference_mode():
+                        normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(1, 2, 0).cpu().numpy()) # call dsine normal predictor, Output shape: (3, H, W), [-1,1]
+                    norm_out = normal # [1, 3, h, w], [-1,1]
+
+            pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+
+            if 'normal_values' in data_dict.keys():
+                gt_norm = data_dict['normal_values'].to(distributed_state.device)
+                gt_norm_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
+
+                pred_error = normal_utils.compute_cosine_error(pred_norm, gt_norm) # [B, C, H, W]
+                # if total_normal_errors is None:
+                #     total_normal_errors = pred_error[gt_norm_mask]
+                # else:
+                #     total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_norm_mask]), dim=0)
+                metrics = normal_utils.cross_verify_metrics(pred_norm*0.5+0.5, gt_norm*0.5+0.5, mask=gt_norm_mask.repeat(1,3,1,1))
+
+                if results_dir is not None:
+                    if 'i' in img_meta:
+                        prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                    else:
+                        prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                    mosaic = vis_utils.visualize_normal(os.path.join(results_dir, curr_task, 'separated'), prefixs, img[None,...], pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
+
+                return mosaic, metrics
+
+        def get_albedo():
+            if eval_mode == "generate_prediction":
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img, required_aovs=['albedo']) # call rgb2x via img, for jpg input, results input checked the same
+                    albedo_out = pred_ret[list(prompts_ret.keys()).index('albedo')][0] # PIL
+                    albedo_out = (np.asarray(albedo_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                    albedo_out = torch.tensor(albedo_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+            pred_albedo, pred_kappa = albedo_out[:, :3, :, :], albedo_out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+
+            # save prediction and gt
+            if 'albedo_values' in data_dict.keys():
+                gt_albedo = (data_dict['albedo_values'].to(distributed_state.device) + 1.0) / 2.0 # albedo_values is scaled to [-1,1] in dataloader, recover here
+                gt_albedo_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
+                pred_error = normal_utils.compute_cosine_error(pred_albedo, gt_albedo)
+                metrics = normal_utils.cross_verify_metrics(pred_albedo*0.5+0.5, gt_albedo*0.5+0.5, mask=gt_albedo_mask.repeat(1,3,1,1))
+
+                # save visualization mosaic
+                if results_dir is not None:
+                    if 'i' in img_meta:
+                        prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                    else:
+                        prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                    mosaic = vis_utils.visualize_albedo(os.path.join(results_dir, curr_task, 'separated'), prefixs, img[None,...], pred_albedo, pred_kappa, gt_albedo, gt_albedo_mask, pred_error)
+                
+                return mosaic, metrics
+        def get_specular():
+            if eval_mode == "generate_prediction":
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img, required_aovs=['specular']) # call rgb2x via img, for jpg input, results input checked the same
+                    out = pred_ret[list(prompts_ret.keys()).index('specular')][0] # PIL
+                    out = (np.asarray(out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                    out = torch.tensor(out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+            pred, pred_kappa = out[:, :3, :, :], out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+
+            # save prediction and gt
+            if 'specular_values' in data_dict.keys():
+                gt = (data_dict['specular_values'].to(distributed_state.device) + 1.0) / 2.0 # specular_values is scaled to [-1,1] in dataloader, recover here
+                gt_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt[:, :1, :, :], dtype=torch.bool)
+                pred_error = normal_utils.compute_cosine_error(pred, gt)
+                metrics = normal_utils.cross_verify_metrics(pred*0.5+0.5, gt*0.5+0.5, mask=gt_mask.repeat(1,3,1,1))
+                if results_dir is not None:
+                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                    mosaic = vis_utils.visualize_albedo(os.path.join(results_dir, curr_task, 'separated'), prefixs, img[None,...], pred, pred_kappa, gt, gt_mask, pred_error)
+                return mosaic, metrics
+            
+        def get_cross():
+            if eval_mode == "generate_prediction":
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img, required_aovs=['cross']) # call rgb2x via img, for jpg input, results input checked the same
+                    out = pred_ret[list(prompts_ret.keys()).index('cross')][0] # PIL
+                    out = (np.asarray(out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                    out = torch.tensor(out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+            pred, pred_kappa = out[:, :3, :, :], out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+
+            # save prediction and gt
+            if 'static_cross_values' in data_dict.keys():
+                if pidx == 0:
+                    gt = (data_dict['static_cross_values'].to(distributed_state.device) + 1.0) / 2.0 # static_cross_values is scaled to [-1,1] in dataloader, recover here
+                else:
+                    gt = (data_dict['cross_values'][:,pidx-1].to(distributed_state.device) + 1.0) / 2.0 # cross_values is scaled to [-1,1] in dataloader, recover here
+                gt_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt[:, :1, :, :], dtype=torch.bool)
+                pred_error = normal_utils.compute_cosine_error(pred, gt)
+                metrics = normal_utils.cross_verify_metrics(pred*0.5+0.5, gt*0.5+0.5, mask=gt_mask.repeat(1,3,1,1))
+                if results_dir is not None:
+                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                    mosaic = vis_utils.visualize_albedo(os.path.join(results_dir, curr_task, 'separated'), prefixs, img[None,...], pred, pred_kappa, gt, gt_mask, pred_error)
+                return mosaic, metrics
+            
+        def get_parallel():
+            if eval_mode == "generate_prediction":
+                if 'rgb2x' in model_alias:
+                    img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img, required_aovs=['parallel']) # call rgb2x via img, for jpg input, results input checked the same
+                    out = pred_ret[list(prompts_ret.keys()).index('parallel')][0] # PIL
+                    out = (np.asarray(out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                    out = torch.tensor(out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+            pred, pred_kappa = out[:, :3, :, :], out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+
+            # save prediction and gt
+            if 'static_parallel_values' in data_dict.keys():
+                if pidx == 0:
+                    gt = (data_dict['static_parallel_values'].to(distributed_state.device) + 1.0) / 2.0 # static_parallel_values is scaled to [-1,1] in dataloader, recover here
+                else:
+                    gt = (data_dict['parallel_values'][:,pidx-1].to(distributed_state.device) + 1.0) / 2.0 # parallel_values is scaled to [-1,1] in dataloader, recover here
+                gt_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt[:, :1, :, :], dtype=torch.bool)
+                pred_error = normal_utils.compute_cosine_error(pred, gt)
+                metrics = normal_utils.cross_verify_metrics(pred*0.5+0.5, gt*0.5+0.5, mask=gt_mask.repeat(1,3,1,1))
+                if results_dir is not None:
+                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                    mosaic = vis_utils.visualize_albedo(os.path.join(results_dir, curr_task, 'separated'), prefixs, img[None,...], pred, pred_kappa, gt, gt_mask, pred_error)
+                return mosaic, metrics
+            
+        def get_forward():
+            
+            if eval_mode == "generate_prediction":
+                img_black = torch.zeros_like(img)
+                img_white = torch.ones_like(img)
+                if 'x2rgb' in model_alias:
+                    img_albedo = data_dict['albedo_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    img_normal = data_dict['normal_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    img_specular = data_dict['specular_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    img_static_cross = data_dict['static_cross_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    img_static_parallel = data_dict['static_parallel_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    # img_normal = data_dict['normal_c2w_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
+                    img_irradiance = img_white if pidx == 0 else data_dict['irradiance_values'][bsz-1][pidx-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
+                    # img_irradiance = data_dict['pixel_irradiance_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
+
+                    if not inverse_model_alias or inverse_model_alias == 'gt':
+                        if curr_task == 'forward_gbuffer':
+                            img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_normal, img_roughness=img_specular, img_metallic=img_black, img_irradiance=img_irradiance) # call rgb2x via img, for jpg input, results input checked the same
+                        elif curr_task == 'forward_gbuffer_albedo_only':
+                            img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance) # call rgb2x via img, for jpg input, results input checked the same
+                        elif curr_task == 'forward_polarization':
+                            img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_static_cross, img_normal=img_static_parallel, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance) # call rgb2x via img, for jpg input, results input checked the same
+                    else:
+                        prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                        
+                        
+                        if curr_task == 'forward_gbuffer':
+                            img_ret, pred_ret, prompts_ret = gen_prediction(
+                                '', 
+                                os.path.join(inverse_output_dir, 'vis', 'albedo', 'separated', prefixs[0], 'pred_albedo.png'), 
+                                os.path.join(inverse_output_dir, 'vis', 'normal', 'separated', prefixs[0], 'norm.png'), 
+                                os.path.join(inverse_output_dir, 'vis', 'specular', 'separated', prefixs[0], 'pred_albedo.png'), 
+                                '', 
+                                '', # irradiance
+                                '', pipeline, accelerator, generator, img_rgb=img, img_albedo=None, img_normal=None, img_roughness=None, img_metallic=img_black, img_irradiance=img_irradiance
+                            ) # call rgb2x via img, for jpg input, results input checked the same
+                        elif curr_task == 'forward_gbuffer_albedo_only':
+                            img_ret, pred_ret, prompts_ret = gen_prediction(
+                                '', 
+                                os.path.join(inverse_output_dir, 'vis', 'albedo', 'separated', prefixs[0], 'pred_albedo.png'), 
+                                '', 
+                                '', 
+                                '', 
+                                '', # irradiance
+                                '', pipeline, accelerator, generator, img_rgb=img, img_albedo=None, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance
+                            ) # call rgb2x via img, for jpg input, results input checked the same
+                        elif curr_task == 'forward_polarization':
+                            img_ret, pred_ret, prompts_ret = gen_prediction(
+                                '', 
+                                os.path.join(inverse_output_dir, 'vis', 'cross', 'separated', prefixs[0], 'pred_albedo.png'), 
+                                os.path.join(inverse_output_dir, 'vis', 'parallel', 'separated', prefixs[0], 'pred_albedo.png'), 
+                                '', 
+                                '', 
+                                '', # irradiance
+                                '', pipeline, accelerator, generator, img_rgb=img, img_albedo=None, img_normal=None, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance
+                            ) # call rgb2x via img, for jpg input, results input checked the same
+                        
+                    img_out = pred_ret[bsz-1][0] # PIL
+                    img_out = (np.asarray(img_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                    img_out = torch.tensor(img_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+
+            pred_img, pred_kappa = img_out[:, :3, :, :], img_out[:, 3:, :, :]
+            pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
+            
+            # save prediction and gt
+            if 'static_values' in data_dict.keys():
+                gt_img = img[None,...] # img in [0,1]
+                gt_pixel_mask = data_dict['valid_mask_values'].to(distributed_state.device) if 'valid_mask_values' in data_dict.keys() else torch.ones_like(gt_img[:, :1, :, :], dtype=torch.bool)
+
+                pred_error = normal_utils.compute_cosine_error(pred_img, gt_img)
+                # if total_normal_errors is None:
+                #     total_normal_errors = pred_error[gt_pixel_mask]
+                # else:
+                #     total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_pixel_mask]), dim=0)
+                metrics = normal_utils.cross_verify_metrics(pred_img*0.5+0.5, gt_img*0.5+0.5, mask=gt_pixel_mask.repeat(1,3,1,1))
+
+            # save visualization mosaic
+            if results_dir is not None:
+                in_irradiance = img_irradiance[None,...]
+                in_albedo = img_albedo[None,...]
+                if 'i' in img_meta:
+                    prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
+                else:
+                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [img_meta['l']])]
+                mosaic = vis_utils.visualize_img(os.path.join(results_dir, curr_task, 'separated'), prefixs, gt_img, in_albedo, in_irradiance, pred_img, pred_kappa, pred_error)
+                # mosaics.append(mosaic)
+                
+                # rendering olat
+                step = eval_dir.split('/')[-1].replace('step','')
+                if int(step) % args.evaluation_olat_steps == 0 and pidx == 0:
+                    import imageio
+                
+                    results_dir_olat = os.path.join(output_dir, 'olat')
+                    os.makedirs(results_dir_olat, exist_ok=True)
+                    results_dir_olat_frames = os.path.join(results_dir_olat, 'frames', f'{img_meta["obj"]}_cam{img_meta["cam"]}')
+                    os.makedirs(results_dir_olat_frames, exist_ok=True)
+                    
+                    olat_target_frames = 20
+                    N_OLATS = test_dataset_lightstage.omega_i_world.shape[0]
+                    intensity_scalar = test_dataset_lightstage.olat_wi_rgb_intensity['random1'] / N_OLATS
+                    olat_img_scalar = test_dataset_lightstage.olat_img_intensity['random1']
+                    olat_step = N_OLATS // olat_target_frames
+                    
+                    Ls = torch.tensor(test_dataset_lightstage.omega_i_world[::olat_step]).to(img.device) # (n, 3)
+                    nDotL = torch.einsum('nc,chw->nhw', Ls, data_dict['normal_ls_c2w_values'][bsz-1]) # (n, h, w)
+                    L_rgb = intensity_scalar * torch.ones_like(Ls) # (n, 3)
+                    L_irradiance = torch.einsum('nhw,nc->nchw', torch.maximum(nDotL, torch.tensor(0.0)), L_rgb) # (3, h, w), align with random 1
+                    frame_mosaics = []
+                    for i, img_irradiance_ in enumerate(L_irradiance[:olat_target_frames//2]): # (3, h, w)
+                        # render one view
+                        img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance_) # call rgb2x via img, for jpg input, results input checked the same
+                        frmae_out = pred_ret[bsz-1][0] # PIL
+                        frmae_out = (np.asarray(frmae_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
+                        frmae_out = torch.tensor(frmae_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                        frmae_out = frmae_out[:, :3, :, :]
+                        frmae_out = frmae_out.clamp(0,1)
+                        
+                        frame_id = i*olat_step
+                        # save frame
+                        in_irradiance_ = img_irradiance_[None,...]
+                        gt_img_ = (olat_img_scalar * intensity_scalar * torch.tensor(imageio.imread(os.path.join(os.path.dirname(data_dict['parallel_paths'][bsz-1][0][0]), f'{frame_id+2:06d}.jpg')) / 255.0).permute(2,0,1).unsqueeze(0).to(distributed_state.device)).clip(0, 1) # [1, 3, h, w], load gt from the lightstage video folder
+                        prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['des']], [img_meta['cam']], [i])]
+                        frame_mosaic = vis_utils.visualize_img(results_dir_olat_frames, prefixs, gt_img_, in_albedo, in_irradiance_, frmae_out, pred_kappa, pred_error)
+                        frame_mosaics.append(frame_mosaic)
+                        
+                    # save a mp4 video
+                    imageio.mimwrite(os.path.join(results_dir_olat, f'{prefixs[0]}_olat.mp4'), frame_mosaics, fps=5, quality=8)
+                    
+                return mosaic, metrics
+            
+        ##################### Evaluate #####################
+        metrics_dataset = []
         with distributed_state.split_between_processes(test_loader) as validation_batch:
-            for data_dict in tqdm(validation_batch, desc=f"Evaluating {dataset_name} {split} via {model_alias} on {distributed_state.device}"):
+            for data_dict in tqdm(validation_batch, desc=f"Evaluating {dataset_name} {split} via {model_alias} + {inverse_model_alias} on {distributed_state.device}"):
                 #↓↓↓↓
                 #NOTE: forward pass
-                # img = data_dict['static_value'].to(distributed_state.device) # [1, 3, h, w]
                 img_path = data_dict['static_paths'][bsz-1] # e.g. 'lightstage/scene1/img1.png'
-                img_meta = data_dict['texts'][bsz-1]
-                intrins = None
-
-                # pad input
-                # _, _, orig_H, orig_W = img.shape
-                # lrtb = normal_utils.get_padding(orig_H, orig_W)
-                # img, intrins = normal_utils.pad_input(img, intrins, lrtb)
+                img_meta = data_dict['metas'][bsz-1]
+                intrins = NotImplemented
                 
                 # also evaluate the image pairs
                 img_pairs = [data_dict['static_values'].to(distributed_state.device)[bsz-1]] # static image first
@@ -452,221 +739,104 @@ def evaluation_material(
                 mosaics = []
                 for pidx, img_ in enumerate(img_pairs):
                     # forward pass
-                    # pred_list = model(img, intrins=intrins, mode='test')
-                    # norm_out = pred_list[-1] # [1, 3, h, w]
                     img = (img_ * 0.5 + 0.5).clamp(0, 1) # img_ is in [-1,1]
 
-                    if args.task_name[bsz-1] == 'normal':
-                        if eval_mode == "load_prediction":
-                            # pred_path = os.path.join(prediction_dir, dataset_name, f'{scene_names[0]}_{img_names[0]}_norm.png')
-                            pred_path = os.path.join(prediction_dir, dataset_name, f'{img_meta["obj"]}_norm.png')
-                            norm_out = cv2.cvtColor(cv2.imread(pred_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB)
-                            norm_out = (norm_out.astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3])
-                            norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
+                    if curr_task == 'normal':
+                        mosaic, metrics = get_normal()
+                    elif curr_task == 'albedo':
+                        mosaic, metrics = get_albedo()
+                    elif curr_task == 'specular':
+                        mosaic, metrics = get_specular()
+                    elif curr_task == 'cross':
+                        mosaic, metrics = get_cross()
+                    elif curr_task == 'parallel':
+                        mosaic, metrics = get_parallel()
+                    elif curr_task == 'forward_gbuffer':
+                        mosaic, metrics = get_forward()
+                    elif curr_task == 'forward_gbuffer_albedo_only':
+                        mosaic, metrics = get_forward()
+                    elif curr_task == 'forward_polarization':
+                        mosaic, metrics = get_forward()
 
-                        elif eval_mode == "generate_prediction":
-                            # resize to processing_res
-                            # if processing_res is not None:
-                            #     input_size = img.shape
-                            #     img =  resize_max_res(
-                            #     img, max_edge_resolution=processing_res,
-                            #     # resample_method=resample_method,
-                            #     )
-                            # norm_out = gen_prediction(img, pipeline) # [1, 3, h, w]
-                            if 'rgb2x' in model_alias:
-                                # img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
-                                img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img) # call rgb2x
-                                norm_out = pred_ret[list(prompts_ret.keys()).index('normal')][0] # PIL
-                                norm_out = (np.asarray(norm_out).astype(np.float32) / 255.0) * 2.0 - 1.0 # np.array([h,w,3]), [-1,1]
-                                norm_out = torch.tensor(norm_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-                            elif 'lotus' in model_alias:
-                                norm_out = gen_prediction(img_path, pipeline, accelerator) # call rgb2x # [1, 3, h, w], [-1,1]
-                            elif 'dsine' in model_alias:
-                                # Use the model to infer the normal map from the input image
-                                with torch.inference_mode():
-                                    normal = pipeline.infer_cv2((img*255.).to(torch.float32).permute(0, 2, 3, 1).cpu().numpy()[0])[0] # call dsine normal predictor, Output shape: (3, H, W), [-1,1]
-                                norm_out = normal[None, ...] # [1, 3, h, w], [-1,1]
-
-                            # resize to original res
-                            # if processing_res is not None:
-                            #     norm_out = resize(norm_out, input_size[-2:], antialias=True, )
-
-                        # crop the padded part
-                        # norm_out = norm_out[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W]
-
-                        pred_norm, pred_kappa = norm_out[:, :3, :, :], norm_out[:, 3:, :, :]
-                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
-                        #↑↑↑↑
-
-                        if 'normal_w2c_values' in data_dict.keys():
-                            gt_norm = data_dict['normal_w2c_values'].to(distributed_state.device)
-                            gt_norm_mask = data_dict['normal_mask'].to(distributed_state.device) if 'normal_mask' in data_dict.keys() else torch.ones_like(gt_norm[:, :1, :, :], dtype=torch.bool)
-
-                            # gt_norm = gt_norm[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
-                            # gt_norm_mask = gt_norm_mask[:, :, lrtb[2]:lrtb[2]+orig_H, lrtb[0]:lrtb[0]+orig_W] # crop the padded part
-                            
-                            pred_error = normal_utils.compute_normal_error(pred_norm, gt_norm)
-                            if total_normal_errors is None:
-                                total_normal_errors = pred_error[gt_norm_mask]
-                                # total_normal_errors = pred_error
-                            else:
-                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_norm_mask]), dim=0)
-                                # total_normal_errors = torch.cat((total_normal_errors, pred_error), dim=0)
-
-                        if results_dir is not None:
-                            if 'i' in img_meta:
-                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                            else:
-                                prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip(img_meta['obj'], img_meta['mat'], img_meta['cam'], img_meta['l'])]
-                            mosaic = vis_utils.visualize_normal(results_dir, prefixs, img[None,...], pred_norm, pred_kappa, gt_norm, gt_norm_mask, pred_error)
-                            mosaics.append(mosaic)
-
-                    elif args.task_name[bsz-1] == 'albedo':
-
-                        if eval_mode == "generate_prediction":
-                            if 'rgb2x' in model_alias:
-                                # img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator) # call rgb2x
-                                img_ret, pred_ret, prompts_ret = gen_prediction(img_path, pipeline, accelerator, generator, img_rgb=img) # call rgb2x via img, for jpg input, results input checked the same
-                                albedo_out = pred_ret[list(prompts_ret.keys()).index('albedo')][0] # PIL
-                                albedo_out = (np.asarray(albedo_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
-                                albedo_out = torch.tensor(albedo_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-
-                        pred_albedo, pred_kappa = albedo_out[:, :3, :, :], albedo_out[:, 3:, :, :]
-                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
-                        #↑↑↑↑
-
-                        # save prediction and gt
-                        if 'albedo_values' in data_dict.keys():
-                            gt_albedo = (data_dict['albedo_values'].to(distributed_state.device) + 1.0) / 2.0 # albedo_values is scaled to [-1,1] in dataloader, recover here
-                            gt_albedo_mask = data_dict['albedo_mask'].to(distributed_state.device) if 'albedo_mask' in data_dict.keys() else torch.ones_like(gt_albedo[:, :1, :, :], dtype=torch.bool)
-
-                            pred_error = normal_utils.compute_normal_error(pred_albedo, gt_albedo)
-                            if total_normal_errors is None:
-                                total_normal_errors = pred_error[gt_albedo_mask]
-                            else:
-                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_albedo_mask]), dim=0)
-
-                        # save visualization mosaic
-                        if results_dir is not None:
-                            if 'i' in img_meta:
-                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                            else:
-                                prefixs = [f'{o}_cam{c}_l{l}' + ('_noaug' if not pidx else f'_aug{pidx}') for (o,c,l) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'])]
-                            mosaic = vis_utils.visualize_albedo(results_dir, prefixs, img[None,...], pred_albedo, pred_kappa, gt_albedo, gt_albedo_mask, pred_error)
-                            mosaics.append(mosaic)
-
-                    elif args.task_name[bsz-1] == 'forward':
-
-                        if eval_mode == "generate_prediction":
-                            if 'x2rgb' in model_alias:
-                                img_black = torch.zeros_like(img)
-                                img_white = torch.ones_like(img)
-                                img_albedo = data_dict['albedo_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
-                                img_normal = data_dict['normal_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
-                                # img_normal = data_dict['normal_c2w_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1]
-                                img_irradiance = img_white if pidx == 0 else data_dict['irradiance_values'][bsz-1][pidx-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
-                                # img_irradiance = data_dict['pixel_irradiance_values'][bsz-1] * 0.5 + 0.5 # [1, 3, h, w], in [0,1], only use irradiance for augmented images
-
-                                img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance) # call rgb2x via img, for jpg input, results input checked the same
-                                img_out = pred_ret[bsz-1][0] # PIL
-                                img_out = (np.asarray(img_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
-                                img_out = torch.tensor(img_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-
-                        pred_img, pred_kappa = img_out[:, :3, :, :], img_out[:, 3:, :, :]
-                        pred_kappa = None if pred_kappa.size(1) == 0 else pred_kappa
-                        
-                        # save prediction and gt
-                        if 'static_values' in data_dict.keys():
-                            gt_img = img[None,...] # img in [0,1]
-                            gt_pixel_mask = data_dict['pixel_mask'].to(distributed_state.device) if 'pixel_mask' in data_dict.keys() else torch.ones_like(gt_img[:, :1, :, :], dtype=torch.bool)
-
-                            pred_error = normal_utils.compute_normal_error(pred_img, gt_img)
-                            if total_normal_errors is None:
-                                total_normal_errors = pred_error[gt_pixel_mask]
-                            else:
-                                total_normal_errors = torch.cat((total_normal_errors, pred_error[gt_pixel_mask]), dim=0)
-
-                        # save visualization mosaic
-                        if results_dir is not None:
-                            in_irradiance = img_irradiance[None,...]
-                            in_albedo = img_albedo[None,...]
-                            if 'i' in img_meta:
-                                prefixs = [f'{o}_cam{c}_l{l}_i{i}_j{j}' for (o,c,l,i,j) in zip(img_meta['obj'], img_meta['cam'], img_meta['l'], img_meta['i'], img_meta['j'])]
-                            else:
-                                prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['mat']], [img_meta['cam']], [img_meta['l']])]
-                            mosaic = vis_utils.visualize_img(os.path.join(results_dir, 'separated'), prefixs, gt_img, in_albedo, in_irradiance, pred_img, pred_kappa, pred_error)
-                            mosaics.append(mosaic)
-                            
-                            # rendering olat
-                            step = eval_dir.split('/')[-1].replace('step','')
-                            if int(step) % args.evaluation_olat_steps == 0 and pidx == 0:
-                                import imageio
-                            
-                                results_dir_olat = os.path.join(output_dir, 'olat')
-                                os.makedirs(results_dir_olat, exist_ok=True)
-                                results_dir_olat_frames = os.path.join(results_dir_olat, 'frames', f'{img_meta["obj"]}_cam{img_meta["cam"]}')
-                                os.makedirs(results_dir_olat_frames, exist_ok=True)
-                                
-                                olat_target_frames = 20
-                                N_OLATS = test_dataset_lightstage.omega_i_world.shape[0]
-                                intensity_scalar = test_dataset_lightstage.olat_wi_rgb_intensity['random1'] / N_OLATS
-                                olat_img_scalar = test_dataset_lightstage.olat_img_intensity['random1']
-                                olat_step = N_OLATS // olat_target_frames
-                                
-                                Ls = torch.tensor(test_dataset_lightstage.omega_i_world[::olat_step]).to(img.device) # (n, 3)
-                                nDotL = torch.einsum('nc,chw->nhw', Ls, data_dict['normal_ls_c2w_values'][bsz-1]) # (n, h, w)
-                                L_rgb = intensity_scalar * torch.ones_like(Ls) # (n, 3)
-                                L_irradiance = torch.einsum('nhw,nc->nchw', torch.maximum(nDotL, torch.tensor(0.0)), L_rgb) # (3, h, w), align with random 1
-                                frame_mosaics = []
-                                for i, img_irradiance_ in enumerate(L_irradiance[:olat_target_frames//2]): # (3, h, w)
-                                    # render one view
-                                    img_ret, pred_ret, prompts_ret = gen_prediction('', '', '', '', '', '', '', pipeline, accelerator, generator, img_rgb=img, img_albedo=img_albedo, img_normal=img_black, img_roughness=img_black, img_metallic=img_black, img_irradiance=img_irradiance_) # call rgb2x via img, for jpg input, results input checked the same
-                                    frmae_out = pred_ret[bsz-1][0] # PIL
-                                    frmae_out = (np.asarray(frmae_out).astype(np.float32) / 255.0) # np.array([h,w,3]), [0,1]
-                                    frmae_out = torch.tensor(frmae_out).permute(2,0,1).unsqueeze(0).to(distributed_state.device) # torch.tensor([1, 3, h, w])
-                                    frmae_out = frmae_out[:, :3, :, :]
-                                    frmae_out = frmae_out.clamp(0,1)
-                                    
-                                    frame_id = i*olat_step
-                                    # save frame
-                                    in_irradiance_ = img_irradiance_[None,...]
-                                    gt_img_ = (olat_img_scalar * intensity_scalar * torch.tensor(imageio.imread(os.path.join(os.path.dirname(data_dict['parallel_paths'][bsz-1][0][0]), f'{frame_id+2:06d}.jpg')) / 255.0).permute(2,0,1).unsqueeze(0).to(distributed_state.device)).clip(0, 1) # [1, 3, h, w], load gt from the lightstage video folder
-                                    prefixs = [f'{o}_cam{c}_l{l}' + ('' if not m else f'_{m}') + ('' if not pidx else f'_aug{pidx}') for (o, m,c,l) in zip([img_meta['obj']], [img_meta['mat']], [img_meta['cam']], [i])]
-                                    frame_mosaic = vis_utils.visualize_img(results_dir_olat_frames, prefixs, gt_img_, in_albedo, in_irradiance_, frmae_out, pred_kappa, pred_error)
-                                    frame_mosaics.append(frame_mosaic)
-                                    
-                                # save a mp4 video
-                                imageio.mimwrite(os.path.join(results_dir_olat, f'{prefixs[0]}_olat.mp4'), frame_mosaics, fps=5, quality=8)
+                    if mosaic is not None:
+                        mosaics.append(mosaic)
+                        metrics_dataset.append(metrics)
 
                 # concatnate mosaics
                 if len(mosaics) > 0:
                     mosaics = np.concatenate(mosaics, axis=0)  # (H*3, W, 3)
-                    target_path = '%s/%s.png' % (os.path.join(results_dir, 'mosaics'), f'{img_meta["obj"]}_cam{img_meta["cam"]}_l{img_meta["l"]}_all')
+                    target_path = '%s/%s.png' % (os.path.join(results_dir, curr_task, 'mosaics'), f'{img_meta["obj"]}_cam{img_meta["cam"]}_l{img_meta["l"]}_all')
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     plt.imsave(target_path, mosaics)
-                            
-        metrics = None
-        if total_normal_errors is not None:
-            metrics = normal_utils.compute_normal_metrics(total_normal_errors)
-            print("Dataset: ", dataset_name)
-            print("mean median rmse 5 7.5 11.25 22.5 30")
-            print("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f" % (
-                metrics['mean'], metrics['median'], metrics['rmse'],
-                metrics['a1'], metrics['a2'], metrics['a3'], metrics['a4'], metrics['a5']))
 
-        metric_results[dataset_name] = metrics
-        # -------------------- Save metrics to file --------------------
-        eval_text = f"Evaluation metrics:\n\
-        on dataset: {dataset_name}\n"
+        metrics_mse = [m['mse'].get('torchmetrics', 0) for m in metrics_dataset]
+        metrics_psnr = [m['psnr'].get('torchmetrics', 0) for m in metrics_dataset]
+        metrics_ssim = [m['ssim'].get('torchmetrics', 0) for m in metrics_dataset]
+        metrics_lpips = [m['lpips'].get('torchmetrics', 0) for m in metrics_dataset]
 
-        eval_text += tabulate(
-        [metrics.keys(), metrics.values()]
-        )
+        metrics_mse_static = [m['mse'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) == 0]
+        metrics_psnr_static = [m['psnr'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) == 0]
+        metrics_ssim_static = [m['ssim'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) == 0]
+        metrics_lpips_static = [m['lpips'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) == 0]
 
-        _save_to = os.path.join(output_dir, "eval_metrics.txt")
-        with open(_save_to, "w+") as f:
+        metrics_mse_olat_aug = [m['mse'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) != 0]
+        metrics_psnr_olat_aug = [m['psnr'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) != 0]
+        metrics_ssim_olat_aug = [m['ssim'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) != 0]
+        metrics_lpips_olat_aug = [m['lpips'].get('torchmetrics', 0) for i, m in enumerate(metrics_dataset) if i % (1 + len(data_dict['parallel_values'][bsz-1])) != 0]
+
+        # write the metrics summary table to file
+        metrics_out_path = os.path.join(output_dir, f"{curr_task}_metrics.txt")
+        with open(metrics_out_path, "w+") as f:
+            eval_text = f"Evaluation metrics:\n\
+            of predictions: {prediction_dir}\n\
+            on dataset: {dataset_name}\n\
+            with samples in: {dataset_split_path}\n"
+            eval_text += f"Number of samples: {len(metrics_dataset)}\n"
+            eval_text += tabulate(
+                [
+                    
+                    ['mse', 'psnr', 'ssim', 'lpips'],
+                    [f"{np.mean(metrics_mse):.6f} ± {np.std(metrics_mse):.6f}", 
+                     f"{np.mean(metrics_psnr):.3f} ± {np.std(metrics_psnr):.3f}", 
+                     f"{np.mean(metrics_ssim):.3f} ± {np.std(metrics_ssim):.3f}", 
+                     f"{np.mean(metrics_lpips):.3f} ± {np.std(metrics_lpips):.3f}"]
+                ]
+            )
+            eval_text += f"\nNumber of static samples: {len(metrics_mse_static)}\n"
+            eval_text += tabulate(
+                [
+                    
+                    ['mse', 'psnr', 'ssim', 'lpips'],
+                    [f"{np.mean(metrics_mse_static):.6f} ± {np.std(metrics_mse_static):.6f}", 
+                     f"{np.mean(metrics_psnr_static):.3f} ± {np.std(metrics_psnr_static):.3f}", 
+                     f"{np.mean(metrics_ssim_static):.3f} ± {np.std(metrics_ssim_static):.3f}", 
+                     f"{np.mean(metrics_lpips_static):.3f} ± {np.std(metrics_lpips_static):.3f}"]
+                ]
+            )
+            eval_text += f"\nNumber of olat augmented samples: {len(metrics_mse_olat_aug)}\n"
+            eval_text += tabulate(
+                [
+                    ['mse', 'psnr', 'ssim', 'lpips'],
+                    [f"{np.mean(metrics_mse_olat_aug):.6f} ± {np.std(metrics_mse_olat_aug):.6f}", 
+                     f"{np.mean(metrics_psnr_olat_aug):.3f} ± {np.std(metrics_psnr_olat_aug):.3f}", 
+                     f"{np.mean(metrics_ssim_olat_aug):.3f} ± {np.std(metrics_ssim_olat_aug):.3f}", 
+                     f"{np.mean(metrics_lpips_olat_aug):.3f} ± {np.std(metrics_lpips_olat_aug):.3f}"]
+                ]
+            )
+            
             f.write(eval_text)
-            logging.info(f"Evaluation metrics saved to {_save_to}")
+            logging.info(f"Evaluation metrics saved to {metrics_out_path}")
+
+        # metrics = None
+        # if total_normal_errors is not None:
+        #     metrics = normal_utils.compute_normal_metrics(total_normal_errors)
+        #     print("Dataset: ", dataset_name)
+        #     print("mean median rmse 5 7.5 11.25 22.5 30")
+        #     print("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f" % (
+        #         metrics['mean'], metrics['median'], metrics['rmse'],
+        #         metrics['a1'], metrics['a2'], metrics['a3'], metrics['a4'], metrics['a5']))
+
+        metric_results[dataset_name] = metrics_dataset
 
         
     return metric_results

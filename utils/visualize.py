@@ -41,7 +41,7 @@ def unnormalize(img_in, img_stats={'mean': [0.5,0.5,0.5], 'std': [0.5,0.5,0.5]})
     img_out = (img_out * 255.0).astype(np.uint8)
     return img_out
 
-def normal_to_rgb(normal, normal_mask=None):
+def normal_to_rgb(normal, normal_mask=None, mask_background_white=True):
     """ surface normal map to RGB
         (used for visualization)
 
@@ -56,12 +56,16 @@ def normal_to_rgb(normal, normal_mask=None):
     normal_norm[normal_norm < 1e-12] = 1e-12
     normal = normal / normal_norm
 
-    normal_rgb = (((normal + 1) * 0.5) * 255).astype(np.uint8)
+    # normal_rgb = (((normal + 1) * 0.5) * 255).astype(np.uint8)
+    normal_rgb = ((normal + 1) * 0.5)
     if normal_mask is not None:
-        normal_rgb = normal_rgb * normal_mask     # (B, H, W, 3)
+        if mask_background_white:
+            normal_rgb = normal_rgb * normal_mask + (1.0 - normal_mask) # (B, H, W, 3)
+        else:
+            normal_rgb = normal_rgb * normal_mask     # (B, H, W, 3)
     return normal_rgb
 
-def albedo_to_rgb(albedo, albedo_mask=None):
+def albedo_to_rgb(albedo, albedo_mask=None, mask_background_white=True):
     """ surface normal map to RGB
         (used for visualization)
 
@@ -72,9 +76,14 @@ def albedo_to_rgb(albedo, albedo_mask=None):
         albedo = tensor_to_numpy(albedo)
         albedo_mask = tensor_to_numpy(albedo_mask)
 
-    albedo_rgb = ((albedo + 1) * 0.5 * 255).astype(np.uint8)
+    # albedo_rgb = ((albedo + 1) * 0.5 * 255).astype(np.uint8)
+    # albedo_rgb = ((albedo + 1) * 0.5)
+    albedo_rgb = albedo
     if albedo_mask is not None:
-        albedo_rgb = albedo_rgb * albedo_mask     # (B, H, W, 3)
+        if mask_background_white:
+            albedo_rgb = albedo_rgb * albedo_mask + (1.0 - albedo_mask) # (B, H, W, 3)
+        else:
+            albedo_rgb = albedo_rgb * albedo_mask     # (B, H, W, 3)
     return albedo_rgb
 
 def kappa_to_alpha(pred_kappa, to_numpy=True):
@@ -113,28 +122,44 @@ def visualize_normal(target_dir, prefixs, img, pred_norm, pred_kappa,
     for i in range(num_vis):
         # img
         img_ = unnormalize(img[i, ...])
-        target_path = '%s/%s_img.png' % (target_dir, prefixs[i])
-        plt.imsave(target_path, img[i, ...])
+        target_path = '%s/%s/img.png' % (target_dir, prefixs[i])
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        img = albedo_to_rgb(img[i, ...], gt_norm_mask[i, ...])
+        plt.imsave(target_path, img)
 
         # pred_norm 
-        target_path = '%s/%s_norm.png' % (target_dir, prefixs[i])
-        plt.imsave(target_path, normal_to_rgb(pred_norm[i, ...]))
+        target_path = '%s/%s/norm.png' % (target_dir, prefixs[i])
+        pred_norm = normal_to_rgb(pred_norm[i, ...], gt_norm_mask[i, ...])
+        plt.imsave(target_path, pred_norm)
 
         # pred_kappa
         if pred_kappa is not None:
             pred_alpha = kappa_to_alpha(pred_kappa[i, :, :, 0])
-            target_path = '%s/%s_pred_alpha.png' % (target_dir, prefixs[i])
+            target_path = '%s/%s/pred_alpha.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, pred_alpha, vmin=0.0, vmax=error_max, cmap='jet')
 
         # gt_norm, pred_error
         if gt_norm is not None:
-            target_path = '%s/%s_gt.png' % (target_dir, prefixs[i])
-            plt.imsave(target_path, normal_to_rgb(gt_norm[i, ...], gt_norm_mask[i, ...]))
+            target_path = '%s/%s/gt.png' % (target_dir, prefixs[i])
+            gt_norm = normal_to_rgb(gt_norm[i, ...], gt_norm_mask[i, ...])
+            plt.imsave(target_path, gt_norm)
 
             E = pred_error[i, :, :, 0] * gt_norm_mask[i, :, :, 0]
-            target_path = '%s/%s_pred_error.png' % (target_dir, prefixs[i])
+            target_path = '%s/%s/pred_error.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')
+            
+            # reload error image add apply normal_to_rgb to mask it out
+            E_img = plt.imread(target_path)
+            E_img = albedo_to_rgb(E_img, gt_norm_mask[i, ...], mask_background_white=True)
+            plt.imsave(target_path, E_img)
 
+        # img, albedo, gt, error
+        all_imgs = [img, pred_norm, gt_norm, plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
+        target_path = '%s/%s.png' % (target_dir, prefixs[i])
+        plt.imsave(target_path, all_imgs)
+
+    return all_imgs
 
 def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
                         gt_albedo, gt_albedo_mask, pred_error, num_vis=-1):
@@ -155,11 +180,13 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
         img_ = unnormalize(img[i, ...])
         target_path = '%s/%s/img.png' % (target_dir, prefixs[i])
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        plt.imsave(target_path, img[i, ...])
+        img = albedo_to_rgb(img[i, ...], gt_albedo_mask[i, ...])
+        plt.imsave(target_path, img)
 
         # pred_norm 
         target_path = '%s/%s/pred_albedo.png' % (target_dir, prefixs[i])
-        plt.imsave(target_path, pred_albedo[i, ...])
+        pred_albedo = albedo_to_rgb(pred_albedo[i, ...], gt_albedo_mask[i, ...])
+        plt.imsave(target_path, pred_albedo)
 
         # pred_kappa
         if pred_kappa is not None:
@@ -170,14 +197,20 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
         # gt_norm, pred_error
         if gt_albedo is not None:
             target_path = '%s/%s/gt_albedo.png' % (target_dir, prefixs[i])
-            plt.imsave(target_path, gt_albedo[i, ...])
+            gt_albedo = albedo_to_rgb(gt_albedo[i, ...], gt_albedo_mask[i, ...])
+            plt.imsave(target_path, gt_albedo)
 
             E = pred_error[i, :, :, 0] * gt_albedo_mask[i, :, :, 0]
             target_path = '%s/%s/pred_error.png' % (target_dir, prefixs[i])
             plt.imsave(target_path, E, vmin=0, vmax=error_max, cmap='jet')
+            
+            # reload error image add apply normal_to_rgb to mask it out
+            E_img = plt.imread(target_path)
+            E_img = albedo_to_rgb(E_img, gt_albedo_mask[i, ...], mask_background_white=True)
+            plt.imsave(target_path, E_img)
                 
         # img, albedo, gt, error
-        all_imgs = [img[i,...]/255., pred_albedo[i, ...], gt_albedo[i, ...], plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        all_imgs = [img, pred_albedo, gt_albedo, plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
         all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
         target_path = '%s/%s.png' % (target_dir, prefixs[i])
         plt.imsave(target_path, all_imgs)

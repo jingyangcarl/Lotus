@@ -2,7 +2,11 @@
 
 # export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 # export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-export MODEL_NAME="zheng95z/rgb-to-x"
+# export MODEL_NAME="zheng95z/rgb-to-x"
+export MODEL_NAME="zheng95z/x-to-rgb"
+
+# when set this will only contribute to prepare the result for forward rendering
+export PRETRAINED_INVERSE_MODEL_PATH="output/benchmark/train-rgb2x-lora-inverse-bsz32/rgb2x-lora-inverse-ckpt4fr"
 
 # training dataset
 # Set environment variables based on machine name
@@ -34,12 +38,13 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=0
 
 # model configs
 export TIMESTEP=999
-# export TASK_NAME="albedo"
-export TASK_NAME="inverse"
+# export TASK_NAME="forward_gbuffer"
+export TASK_NAME="forward_gbuffer_albedo_only"
+# export TASK_NAME="forward_polarization"
 
 # data augmentation
 export AUG_RATIO="1:1"
@@ -51,19 +56,19 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
 export VAL_STEP=1000
 export VAL_TOP_K=10
-export EVAL_STEP=50000 # need to be integer multiple of VAL_STEP
-export EVAL_TOP_K=80
-export FORWARD_RENDERING_WARMUP_STEPS=400000 # disable warmup
-export EVALUATION_OLAT_STEPS=400000 # disable olat eval
+export EVAL_STEP=1000 # need to be integer multiple of VAL_STEP
+export EVAL_TOP_K=5
+export FORWARD_RENDERING_WARMUP_STEPS=400000
+export EVALUATION_OLAT_STEPS=5000
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}"
+export OUTPUT_DIR="output/benchmark/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}"
 
-# add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
-accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
-  --main_process_port="13226" \
+accelerate launch --mixed_precision="fp16" \
+  --main_process_port="13266" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
+  --pretrained_inverse_model_path=$PRETRAINED_INVERSE_MODEL_PATH \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \
   --resolution_hypersim=$RES_HYPERSIM \
   --train_data_dir_vkitti=$TRAIN_DATA_DIR_VKITTI \
@@ -95,12 +100,12 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --evaluation_top_k=$EVAL_TOP_K \
   --validation_steps=$VAL_STEP \
   --evaluation_steps=$EVAL_STEP \
+  --evaluation_skip_step0 \
   --checkpointing_steps=$VAL_STEP \
   --evaluation_olat_steps=$EVALUATION_OLAT_STEPS \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
-  --use_lora \
   --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
   --save_pred_vis
