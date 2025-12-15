@@ -6,7 +6,7 @@
 export MODEL_NAME="zheng95z/x-to-rgb"
 
 # when set this will only contribute to prepare the result for forward rendering
-export PRETRAINED_INVERSE_MODEL_PATH="output/benchmark/train-rgb2x-lora-inverse-bsz32_cp4FR"
+export PRETRAINED_INVERSE_MODEL_PATH="output/benchmark/train-rgb2x-lora-inverse-bsz32/rgb2x-lora-inverse-ckpt4fr"
 
 # training dataset
 # Set environment variables based on machine name
@@ -42,11 +42,13 @@ export CUDA_VISIBLE_DEVICES=4,5
 
 # model configs
 export TIMESTEP=999
-export TASK_NAME="forward"
+export TASK_NAME="forward_gbuffer"
+# export TASK_NAME="forward_polarization"
 
 # data augmentation
-export AUG_RATIO="1:1"
-export AUG_TYPE="random1"
+export AUG_RATIO="2:1"
+# export AUG_TYPE="random1"
+export AUG_TYPE="random1+hdri_olat20"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -54,15 +56,15 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
 export VAL_STEP=1000
 export VAL_TOP_K=10
-export EVAL_STEP=20000 # need to be integer multiple of VAL_STEP
+export EVAL_STEP=10000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
 export FORWARD_RENDERING_WARMUP_STEPS=400000
 export EVALUATION_OLAT_STEPS=20000
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}"
+export OUTPUT_DIR="output/benchmark/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_hdri"
 
-accelerate launch --config_file=accelerate_configs/cuda_g.yaml  --mixed_precision="fp16" \
+accelerate launch --config_file=accelerate_configs/cuda_d.yaml  --mixed_precision="fp16" \
   --main_process_port="13246" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
@@ -104,5 +106,6 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml  --mixed_precisio
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
+  --use_lora \
   --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
   --save_pred_vis

@@ -49,15 +49,15 @@ export AUG_TYPE="random1"
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
-export VAL_STEP=1000
+export VAL_STEP=5000
 export VAL_TOP_K=10
-export EVAL_STEP=50000 # need to be integer multiple of VAL_STEP
-export EVAL_TOP_K=80
+export EVAL_STEP=300000 # need to be integer multiple of VAL_STEP
+export EVAL_TOP_K=10
 export FORWARD_RENDERING_WARMUP_STEPS=400000 # disable warmup
 export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}"
+export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-346"
 
 # add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
@@ -99,7 +99,7 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --evaluation_olat_steps=$EVALUATION_OLAT_STEPS \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \
   --output_dir=$OUTPUT_DIR \
-  --checkpoints_total_limit=1 \
+  --checkpoints_total_limit=3 \
   --resume_from_checkpoint="latest" \
   --use_lora \
   --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \

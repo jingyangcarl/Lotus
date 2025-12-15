@@ -65,7 +65,7 @@ def normal_to_rgb(normal, normal_mask=None, mask_background_white=True):
             normal_rgb = normal_rgb * normal_mask     # (B, H, W, 3)
     return normal_rgb
 
-def albedo_to_rgb(albedo, albedo_mask=None, mask_background_white=True):
+def albedo_to_rgb(albedo, albedo_mask=None, mask_background_white=True, background_img=None):
     """ surface normal map to RGB
         (used for visualization)
 
@@ -84,6 +84,9 @@ def albedo_to_rgb(albedo, albedo_mask=None, mask_background_white=True):
             albedo_rgb = albedo_rgb * albedo_mask + (1.0 - albedo_mask) # (B, H, W, 3)
         else:
             albedo_rgb = albedo_rgb * albedo_mask     # (B, H, W, 3)
+            
+        if background_img is not None:
+            albedo_rgb = albedo_rgb * albedo_mask + background_img * (1.0 - albedo_mask)
     return albedo_rgb
 
 def kappa_to_alpha(pred_kappa, to_numpy=True):
@@ -162,7 +165,7 @@ def visualize_normal(target_dir, prefixs, img, pred_norm, pred_kappa,
     return all_imgs
 
 def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
-                        gt_albedo, gt_albedo_mask, pred_error, num_vis=-1):
+                        gt_albedo, gt_albedo_mask, pred_error, num_vis=-1, background_img=None):
     """ visualize albedo
     """
     error_max = 60.0
@@ -173,6 +176,24 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
     gt_albedo = tensor_to_numpy(gt_albedo)              # (B, H, W, 3)
     gt_albedo_mask = tensor_to_numpy(gt_albedo_mask)    # (B, H, W, 1)
     pred_error = tensor_to_numpy(pred_error)        # (B, H, W, 1)
+
+    # check if background_img shape matches, if not, crop from the center to match aspect ratio of img and resize
+    if background_img is not None:
+        background_img = tensor_to_numpy(background_img)  # (B, H, W, 3)
+        if background_img.shape[1:3] != img.shape[1:3]:
+            ih, iw = img.shape[1:3]
+            bh, bw = background_img.shape[1:3]
+            scale = max(ih / bh, iw / bw)
+            new_bh = int(bh * scale)
+            new_bw = int(bw * scale)
+            background_img_resized = cv2.resize(background_img[0], (new_bw, new_bh), interpolation=cv2.INTER_LINEAR)[None, ...]  # (1, new_bh, new_bw, 3)
+            # crop center
+            start_y = (new_bh - ih) // 2
+            start_x = (new_bw - iw) // 2
+            background_img_cropped = background_img_resized[:, start_y:start_y+ih, start_x:start_x+iw, :]
+            background_img = background_img_cropped  # (1, H, W, 3)
+    else:
+        background_img = torch.ones_like(img)  # white background
 
     num_vis = len(prefixs) if num_vis == -1 else num_vis
     for i in range(num_vis):
@@ -185,7 +206,7 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
 
         # pred_norm 
         target_path = '%s/%s/pred_albedo.png' % (target_dir, prefixs[i])
-        pred_albedo = albedo_to_rgb(pred_albedo[i, ...], gt_albedo_mask[i, ...])
+        pred_albedo = albedo_to_rgb(pred_albedo[i, ...], gt_albedo_mask[i, ...], background_img=background_img[i,...])
         plt.imsave(target_path, pred_albedo)
 
         # pred_kappa
@@ -197,7 +218,7 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
         # gt_norm, pred_error
         if gt_albedo is not None:
             target_path = '%s/%s/gt_albedo.png' % (target_dir, prefixs[i])
-            gt_albedo = albedo_to_rgb(gt_albedo[i, ...], gt_albedo_mask[i, ...])
+            gt_albedo = albedo_to_rgb(gt_albedo[i, ...], gt_albedo_mask[i, ...], background_img=background_img[i,...])
             plt.imsave(target_path, gt_albedo)
 
             E = pred_error[i, :, :, 0] * gt_albedo_mask[i, :, :, 0]
@@ -211,6 +232,8 @@ def visualize_albedo(target_dir, prefixs, img, pred_albedo, pred_kappa,
                 
         # img, albedo, gt, error
         all_imgs = [img, pred_albedo, gt_albedo, plt.imread('%s/%s/pred_error.png' % (target_dir, prefixs[i]))[...,:3]]
+        if background_img is not None:
+            all_imgs.insert(0, background_img_resized[i,...])
         all_imgs = np.concatenate(all_imgs, axis=1)  # (H, W * 4, 3)
         target_path = '%s/%s.png' % (target_dir, prefixs[i])
         plt.imsave(target_path, all_imgs)

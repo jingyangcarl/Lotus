@@ -56,10 +56,10 @@ export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
 export VAL_STEP=1000
 export VAL_TOP_K=10
-export EVAL_STEP=1000 # need to be integer multiple of VAL_STEP
+export EVAL_STEP=10000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=5
 export FORWARD_RENDERING_WARMUP_STEPS=400000
-export EVALUATION_OLAT_STEPS=5000
+export EVALUATION_OLAT_STEPS=10000
 
 # output dir
 export OUTPUT_DIR="output/benchmark/train-x2rgb-${TASK_NAME}-bsz${TOTAL_BSZ}"
@@ -100,7 +100,6 @@ accelerate launch --mixed_precision="fp16" \
   --evaluation_top_k=$EVAL_TOP_K \
   --validation_steps=$VAL_STEP \
   --evaluation_steps=$EVAL_STEP \
-  --evaluation_skip_step0 \
   --checkpointing_steps=$VAL_STEP \
   --evaluation_olat_steps=$EVALUATION_OLAT_STEPS \
   --base_test_data_dir=$BASE_TEST_DATA_DIR \

@@ -2,11 +2,7 @@
 
 # export MODEL_NAME="stabilityai/stable-diffusion-2-base"
 # export MODEL_NAME="jingheya/lotus-normal-g-v1-1"
-# export MODEL_NAME="zheng95z/rgb-to-x"
-export MODEL_NAME="zheng95z/x-to-rgb"
-
-# when set this will only contribute to prepare the result for forward rendering
-export PRETRAINED_INVERSE_MODEL_PATH="output/benchmark/train-rgb2x-lora-inverse-bsz32/rgb2x-lora-inverse-ckpt4fr"
+export MODEL_NAME="zheng95z/rgb-to-x"
 
 # training dataset
 # Set environment variables based on machine name
@@ -38,37 +34,36 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=5
 
 # model configs
 export TIMESTEP=999
-# export TASK_NAME="forward_gbuffer"
-export TASK_NAME="forward_polarization"
+# export TASK_NAME="normal"
+export TASK_NAME="parallel"
 
 # data augmentation
-export AUG_RATIO="2:1"
-# export AUG_TYPE="random1"
-export AUG_TYPE="random1+hdri_olat20"
+export AUG_RATIO="1:1"
+export AUG_TYPE="random8"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
 export VALIDATION_IMAGES="datasets/quick_validation/"
 export TRAIN_STEP=300000
-export VAL_STEP=1000
+export VAL_STEP=500
 export VAL_TOP_K=10
-export EVAL_STEP=10000 # need to be integer multiple of VAL_STEP
-export EVAL_TOP_K=50
-export FORWARD_RENDERING_WARMUP_STEPS=400000
-export EVALUATION_OLAT_STEPS=20000
+export EVAL_STEP=5000 # need to be integer multiple of VAL_STEP
+export EVAL_TOP_K=5
+export FORWARD_RENDERING_WARMUP_STEPS=400000 # disable warmup
+export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-x2rgb-lora-${TASK_NAME}-bsz${TOTAL_BSZ}_hdri"
+export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-use_parallel_prompt"
 
-accelerate launch --config_file=accelerate_configs/cuda_g.yaml  --mixed_precision="fp16" \
-  --main_process_port="13256" \
+# add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
+accelerate launch --mixed_precision="fp16" \
+  --main_process_port="13246" \
   train_lotus_g_rgb2x.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
-  --pretrained_inverse_model_path=$PRETRAINED_INVERSE_MODEL_PATH \
   --train_data_dir_hypersim=$TRAIN_DATA_DIR_HYPERSIM \
   --resolution_hypersim=$RES_HYPERSIM \
   --train_data_dir_vkitti=$TRAIN_DATA_DIR_VKITTI \
