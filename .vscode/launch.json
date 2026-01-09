@@ -12,14 +12,13 @@
             "console": "integratedTerminal",
             "env": {
                 // "CUDA_VISIBLE_DEVICES": "1,2,3,4,5",
-                "CUDA_VISIBLE_DEVICES": "1",
+                "CUDA_VISIBLE_DEVICES": "0",
             },
             "args": [
                 // "--nproc_per_node=5",
                 "--nproc_per_node=1",
-                "--master_port=12341",
-                "eval_lightstage_loop_iradiance.py",
-                "2"
+                "--master_port=12342",
+                "eval_lightstage.py",
             ],
         },
         {
@@ -158,8 +157,12 @@
                 "--prob_hypersim=0.",
                 "--prob_vkitti=0.",
                 "--prob_lightstage=1.",
-                "--lightstage_lighting_augmentation=random8",
-                "--lightstage_original_augmentation_ratio=1:1",
+                // "--lightstage_lighting_augmentation=random_olat8",
+                // "--lightstage_original_augmentation_ratio=1:1:0",
+                // "--lightstage_lighting_augmentation=random_hdri_olat21",
+                // "--lightstage_original_augmentation_ratio=1:0:1",
+                "--lightstage_lighting_augmentation=random_olat8+hdri_olat21",
+                "--lightstage_original_augmentation_ratio=1:1:1",
                 "--lightstage_lighting_augmentation_pair_n=2",
                 "--lightstage_augmentation_pair_loss_enable",
                 "--lightstage_img_ext=jpg",
@@ -167,7 +170,7 @@
                 "--random_flip",
                 "--norm_type=trunc_disparity",
                 "--align_cam_normal",
-                "--dataloader_num_workers=4",
+                "--dataloader_num_workers=8",
                 "--train_batch_size=4",
                 "--gradient_accumulation_steps=1",
                 "--gradient_checkpointing",
@@ -195,8 +198,8 @@
                 "--output_dir=output/debug/debug_jpg_IR",
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest",
-                // "--use_lora",
-                "--forward_rendering_warmup_steps=10000000000",
+                "--use_lora",
+                // "--forward_rendering_warmup_steps=10000000000",
                 "--save_pred_vis"
             ],
             "justMyCode": false

@@ -34,7 +34,6 @@ export BATCH_SIZE=4
 export CUDA=01234567
 export GAS=1
 export TOTAL_BSZ=$(($BATCH_SIZE * ${#CUDA} * $GAS))
-export CUDA_VISIBLE_DEVICES=6,7
 
 # model configs
 export TIMESTEP=999
@@ -42,8 +41,10 @@ export TIMESTEP=999
 export TASK_NAME="inverse"
 
 # data augmentation
-export AUG_RATIO="1:1"
-export AUG_TYPE="random1"
+# export AUG_RATIO="1:1:1"
+# export AUG_TYPE="random_olat8+hdri_olat21"
+export AUG_RATIO="0:0:1"
+export AUG_TYPE="random_hdri_olat43"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -53,11 +54,10 @@ export VAL_STEP=5000
 export VAL_TOP_K=10
 export EVAL_STEP=300000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=10
-export FORWARD_RENDERING_WARMUP_STEPS=400000 # disable warmup
 export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-346"
+export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-olat43"
 
 # add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
 accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision="fp16" \
@@ -102,5 +102,4 @@ accelerate launch --config_file=accelerate_configs/cuda_d.yaml --mixed_precision
   --checkpoints_total_limit=3 \
   --resume_from_checkpoint="latest" \
   --use_lora \
-  --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
   --save_pred_vis

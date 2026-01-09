@@ -1286,8 +1286,7 @@ def parse_args():
     parser.add_argument(
         "--lightstage_original_augmentation_ratio",
         type=str,
-        default="1:1",
-        choices=["1:1", "1:0", "0:1", "2:1"],
+        default="1:1:1",
     )
     parser.add_argument(
         "--lightstage_img_ext",
@@ -1525,12 +1524,12 @@ def parse_args():
         action="store_true",
         help="Whether to use LoRA for training. If True, LoRA will be used for all models.",
     )
-    parser.add_argument(
-        "--forward_rendering_warmup_steps",
-        type=int,
-        default=0,
-        help="Number of steps to warmup the rendering loss. When set larger than total training steps, the rendering loss will be disabled.",
-    )
+    # parser.add_argument(
+    #     "--forward_rendering_warmup_steps",
+    #     type=int,
+    #     default=0,
+    #     help="Number of steps to warmup the rendering loss. When set larger than total training steps, the rendering loss will be disabled.",
+    # )
     parser.add_argument('--train_unet_from_scratch', action='store_true', help="Whether to train unet from scratch.")
 
     args = parser.parse_args()
@@ -1691,17 +1690,17 @@ def main():
         )
         
         # include x2rgb
-        if args.forward_rendering_warmup_steps < args.max_train_steps:
-            unet_fr = UNet2DConditionModel.from_pretrained(
-                args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'), subfolder="unet", revision=args.revision, variant=args.variant,
-                low_cpu_mem_usage=False, device_map=None,
-            )
-            pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
-                args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'),
-            )
-            noise_scheduler_fr = DDIMScheduler.from_config(
-                pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
-            )
+        # if args.forward_rendering_warmup_steps < args.max_train_steps:
+        #     unet_fr = UNet2DConditionModel.from_pretrained(
+        #         args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'), subfolder="unet", revision=args.revision, variant=args.variant,
+        #         low_cpu_mem_usage=False, device_map=None,
+        #     )
+        #     pipeline_x2rgb = StableDiffusionAOVDropoutPipeline.from_pretrained(
+        #         args.pretrained_model_name_or_path.replace('rgb-to-x', 'x-to-rgb'),
+        #     )
+        #     noise_scheduler_fr = DDIMScheduler.from_config(
+        #         pipeline_x2rgb.scheduler.config, rescale_betas_zero_snr=True, timestep_spacing="trailing"
+        #     )
     elif 'x-to-rgb' in args.pretrained_model_name_or_path:
         unet = UNet2DConditionModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant,
@@ -2272,7 +2271,8 @@ def main():
                 
             if 'augmented' in batch:
                 total_samples += batch["pixel_values"].shape[0]
-                augmented_samples += batch["augmented"].sum().item()
+                # augmented_samples += (batch["augmented"] != 'static').sum().item()
+                augmented_samples += np.sum(np.array(batch["augmented"]) != 'static').item()
 
             with accelerator.accumulate(unet, unet_fr if 'unet_fr' in locals() else None):
                 # Convert images to latent space
@@ -2575,75 +2575,75 @@ def main():
                     loss = anno_loss + rgb_loss + rgb_pair_loss*0
                     
                     # forward renderer loss
-                    if 'unet_fr' in locals() and global_step+1 >= args.forward_rendering_warmup_steps:
+                    # if 'unet_fr' in locals() and global_step+1 >= args.forward_rendering_warmup_steps:
                         
-                        noise_fr = torch.randn_like(rgb_latents) # [B, 4, h, w]
-                        timesteps_fr = torch.randint(0, noise_scheduler_fr.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [B,]
-                        noisy_latents_fr = noise_scheduler_fr.add_noise(target_latents[:bsz], noise_fr, timesteps_fr)
+                    #     noise_fr = torch.randn_like(rgb_latents) # [B, 4, h, w]
+                    #     timesteps_fr = torch.randint(0, noise_scheduler_fr.config.num_train_timesteps, (bsz,), device=target_latents.device, generator=generator).long() # [B,]
+                    #     noisy_latents_fr = noise_scheduler_fr.add_noise(target_latents[:bsz], noise_fr, timesteps_fr)
 
-                        # pass through the first stage unet_fr
-                        with torch.no_grad():
-                            prompts = {
-                                "albedo": "Albedo (diffuse basecolor)",
-                                "normal": "Camera-space Normal",
-                                "roughness": "Roughness",
-                                "metallic": "Metallicness",
-                                "irradiance": "Irradiance (diffuse lighting)",
-                            }
-                            task_latents = []
-                            for task in prompts.keys():
+                    #     # pass through the first stage unet_fr
+                    #     with torch.no_grad():
+                    #         prompts = {
+                    #             "albedo": "Albedo (diffuse basecolor)",
+                    #             "normal": "Camera-space Normal",
+                    #             "roughness": "Roughness",
+                    #             "metallic": "Metallicness",
+                    #             "irradiance": "Irradiance (diffuse lighting)",
+                    #         }
+                    #         task_latents = []
+                    #         for task in prompts.keys():
                                 
-                                if prompts[task] == prompt:
-                                    # save computation
-                                    task_latents.append(model_pred[:bsz].detach())
-                                    continue
+                    #             if prompts[task] == prompt:
+                    #                 # save computation
+                    #                 task_latents.append(model_pred[:bsz].detach())
+                    #                 continue
                                 
-                                text_inputs_ = tokenizer(
-                                    task,
-                                    padding="max_length",
-                                    max_length=tokenizer.model_max_length,
-                                    truncation=True,
-                                    return_tensors="pt",
-                                )
-                                text_input_ids_ = text_inputs_.input_ids.to(target_latents.device)
-                                encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
-                                encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
+                    #             text_inputs_ = tokenizer(
+                    #                 task,
+                    #                 padding="max_length",
+                    #                 max_length=tokenizer.model_max_length,
+                    #                 truncation=True,
+                    #                 return_tensors="pt",
+                    #             )
+                    #             text_input_ids_ = text_inputs_.input_ids.to(target_latents.device)
+                    #             encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
+                    #             encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
                             
-                                # TODO: this cannot be used for trainning the forward right? as the output not the final prediction of different kinds
-                                # TODO: maybe we can use x0 status
-                                model_pred_ = unet(unet_input[:bsz], timesteps[:bsz], encoder_hidden_states_, return_dict=False)[0]
+                    #             # TODO: this cannot be used for trainning the forward right? as the output not the final prediction of different kinds
+                    #             # TODO: maybe we can use x0 status
+                    #             model_pred_ = unet(unet_input[:bsz], timesteps[:bsz], encoder_hidden_states_, return_dict=False)[0]
                                 
-                                if task == 'irradiance':
-                                    # decode to rgb and resize to other branch resolution
-                                    latent_hw = model_pred_.shape[-2:]
-                                    model_pred_ = vae.decode((model_pred_.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
-                                    model_pred_ = F.interpolate(model_pred_, size=latent_hw, mode='bilinear', align_corners=False)
-                                    model_pred_ = model_pred_.float() # should stays in [-1,1]
+                    #             if task == 'irradiance':
+                    #                 # decode to rgb and resize to other branch resolution
+                    #                 latent_hw = model_pred_.shape[-2:]
+                    #                 model_pred_ = vae.decode((model_pred_.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
+                    #                 model_pred_ = F.interpolate(model_pred_, size=latent_hw, mode='bilinear', align_corners=False)
+                    #                 model_pred_ = model_pred_.float() # should stays in [-1,1]
                                 
-                                task_latents.append(model_pred_)
+                    #             task_latents.append(model_pred_)
                             
-                            unet_fr_input = torch.cat([noisy_latents_fr] + task_latents, dim=1) # [B, 4*6, h, w]
+                    #         unet_fr_input = torch.cat([noisy_latents_fr] + task_latents, dim=1) # [B, 4*6, h, w]
                             
-                        # forward rendering
-                        text_inputs_ = tokenizer(
-                            '',
-                            padding="max_length",
-                            max_length=tokenizer.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
-                        )
-                        text_input_ids_ = text_inputs_.input_ids.to(target_latents.device)
-                        encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
-                        encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
-                        model_fr_pred = unet_fr(unet_fr_input, timesteps_fr, encoder_hidden_states_, return_dict=False)[0] # [B, 4, h, w]
+                    #     # forward rendering
+                    #     text_inputs_ = tokenizer(
+                    #         '',
+                    #         padding="max_length",
+                    #         max_length=tokenizer.model_max_length,
+                    #         truncation=True,
+                    #         return_tensors="pt",
+                    #     )
+                    #     text_input_ids_ = text_inputs_.input_ids.to(target_latents.device)
+                    #     encoder_hidden_states_ = text_encoder(text_input_ids_, return_dict=False)[0]
+                    #     encoder_hidden_states_ = encoder_hidden_states_.repeat(bsz, 1, 1)
+                    #     model_fr_pred = unet_fr(unet_fr_input, timesteps_fr, encoder_hidden_states_, return_dict=False)[0] # [B, 4, h, w]
 
-                        assert noise_scheduler_fr.config.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
-                        # target_fr = noise_scheduler_fr.get_velocity(rgb_latents, noise_fr, timesteps_fr)
-                        target_fr = noise_scheduler_fr.get_velocity(target_latents[:bsz], noise_fr, timesteps_fr) #
+                    #     assert noise_scheduler_fr.config.prediction_type == 'v_prediction', "Make sure the noise_scheduler is configured to use v_prediction."
+                    #     # target_fr = noise_scheduler_fr.get_velocity(rgb_latents, noise_fr, timesteps_fr)
+                    #     target_fr = noise_scheduler_fr.get_velocity(target_latents[:bsz], noise_fr, timesteps_fr) #
 
-                        # rendering_loss = F.mse_loss(model_pred_fr[valid_mask_down_anno[:bsz]].float(), rgb_latents[valid_mask_down_anno[:bsz]].float(), reduction="mean")
-                        rendering_loss = F.mse_loss(model_fr_pred[valid_mask_down_anno[:bsz]].float(), target_fr[valid_mask_down_anno[:bsz]].float(), reduction="mean")
-                        loss = loss + rendering_loss
+                    #     # rendering_loss = F.mse_loss(model_pred_fr[valid_mask_down_anno[:bsz]].float(), rgb_latents[valid_mask_down_anno[:bsz]].float(), reduction="mean")
+                    #     rendering_loss = F.mse_loss(model_fr_pred[valid_mask_down_anno[:bsz]].float(), target_fr[valid_mask_down_anno[:bsz]].float(), reduction="mean")
+                    #     loss = loss + rendering_loss
                         
                 elif 'x-to-rgb' in args.pretrained_model_name_or_path:
                     model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0] # [B, 4, h, w]
@@ -2802,40 +2802,40 @@ def main():
                                 img.save(os.path.join(visual_sep_outpath, f"augmented_olat_irradiance_pair{j:02d}.png"))
                                 
                             
-                            img = batch['parallel_values_hstacked'][b].cpu().numpy().transpose(1, 2, 0) # no need to scale this, as this is not scaled in the dataloader
-                            img = Image.fromarray((img * 255).astype(np.uint8))
-                            img.save(os.path.join(visual_sep_outpath, f"augmented_olat_parallel_hstacked.png"))
+                            # img = batch['parallel_values_hstacked'][b].cpu().numpy().transpose(1, 2, 0) # no need to scale this, as this is not scaled in the dataloader
+                            # img = Image.fromarray((img * 255).astype(np.uint8))
+                            # img.save(os.path.join(visual_sep_outpath, f"augmented_olat_parallel_hstacked.png"))
                             
                             
                             # the following is only used for rgb2x and x2rgb is also enabled
-                            if 'unet_fr' in locals() and global_step >= args.forward_rendering_warmup_steps:
+                            # if 'unet_fr' in locals() and global_step >= args.forward_rendering_warmup_steps:
                                 
-                                # visual of forward rendering prediction
-                                fr_pred = model_fr_pred[b:b+1]
-                                alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
-                                sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
-                                denom_ = alpha_t_**2 + sigma_t_**2
-                                fr_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * fr_pred) / denom_  # [1,4,h,w]
+                            #     # visual of forward rendering prediction
+                            #     fr_pred = model_fr_pred[b:b+1]
+                            #     alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
+                            #     sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], fr_pred.shape)
+                            #     denom_ = alpha_t_**2 + sigma_t_**2
+                            #     fr_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * fr_pred) / denom_  # [1,4,h,w]
                                 
-                                pred_decode = vae.decode((fr_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
-                                img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
-                                img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
-                                img = Image.fromarray((img * 255).astype(np.uint8))
-                                img.save(os.path.join(visual_outpath, f"pred_fr_static.png"))
+                            #     pred_decode = vae.decode((fr_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
+                            #     img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
+                            #     img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
+                            #     img = Image.fromarray((img * 255).astype(np.uint8))
+                            #     img.save(os.path.join(visual_outpath, f"pred_fr_static.png"))
                                 
-                                # visual of albedo prediction
-                                albedo_pred = unet_fr_input[b:b+1, 4:8].float() # from rgb2x, therefore use default vae scaling_factor
-                                alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
-                                sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
-                                denom_ = alpha_t_**2 + sigma_t_**2
-                                albedo_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * albedo_pred) / denom_  # [1,4,h,w]
+                            #     # visual of albedo prediction
+                            #     albedo_pred = unet_fr_input[b:b+1, 4:8].float() # from rgb2x, therefore use default vae scaling_factor
+                            #     alpha_t_ = _extract(torch.sqrt(alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
+                            #     sigma_t_ = _extract(torch.sqrt(1.0 - alphas_cumprod), timesteps[b:b+1], albedo_pred.shape)
+                            #     denom_ = alpha_t_**2 + sigma_t_**2
+                            #     albedo_pred_x0 = (alpha_t_ * unet_input[b:b+1, :bsz_per_task] - sigma_t_ * albedo_pred) / denom_  # [1,4,h,w]
                                 
-                                # get the decoded albedo image
-                                pred_decode = vae.decode((albedo_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
-                                img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
-                                img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
-                                img = Image.fromarray((img * 255).astype(np.uint8))
-                                img.save(os.path.join(visual_outpath, f"pred_ir_albedo.png"))
+                            #     # get the decoded albedo image
+                            #     pred_decode = vae.decode((albedo_pred_x0.float() / vae.config.scaling_factor).to(vae.dtype), return_dict=False)[0]
+                            #     img = pred_decode[0].float().detach().cpu().numpy().transpose(1, 2, 0)
+                            #     img = (img + 1.0) * 0.5 # scale from [-1, 1] to [0, 1]
+                            #     img = Image.fromarray((img * 255).astype(np.uint8))
+                            #     img.save(os.path.join(visual_outpath, f"pred_ir_albedo.png"))
                             
                             # TODO: save out the olat hdri
                             

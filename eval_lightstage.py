@@ -14,7 +14,7 @@ from ptflops import get_model_complexity_info
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../lotus')))
-from lotus.utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage
+from lotus.utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage, dry_run_multi_gpu
 from lotus.utils.objaverse_dataset import ObjaverseDataset, collate_fn_objaverse
 import lotus.utils.visualize as vis_utils
 from lotus.train_lotus_g_rgb2x import rgb2x
@@ -82,9 +82,6 @@ def build_dataloader(dataset_name, lighting_aug, first_n, first_n_hdri, n_rot, o
 
 def run(config, rank=0, world_size=1, device=torch.device("cuda:0")):
 
-    first_n = 2 if len(sys.argv) < 2 else int(sys.argv[1])
-    print(f"Evaluating first {first_n} samples from lightstage dataset")
-    
     lighting_augs = config['lighting_augs']
     datasets = config['datasets']
     irradiance_levels = config.get('irradiance_levels')
@@ -679,15 +676,15 @@ def run(config, rank=0, world_size=1, device=torch.device("cuda:0")):
     # dist.barrier()
     # dist.destroy_process_group()
     
-def develop_dataset(config, rank, world_size, device):
+def develop_dataset_single_gpu(config, rank, world_size, device):
     
     datasets = config['datasets']
     lighting_augs = config['lighting_augs']
     irradiance_levels = config.get('irradiance_levels')
     overexposure_remove = config.get('overexposure_remove', False)
-    
-    
-    outdir = 'output/develop'
+
+
+    outdir = config.get('outdir', 'output/eval_dev')
     exp_name = ''
     pipeline_name = 'visual'
     bsz = 1
@@ -775,7 +772,7 @@ def combine_dev_results_sbs(config, rank, world_size, device):
     irradiance_levels = config.get('irradiance_levels')
     overexposure_remove = config.get('overexposure_remove', False)
     
-    outdir = 'output/develop'
+    outdir = config.get('outdir', 'output/eval_dev')
     exp_name = ''
     pipeline_name = 'visual'
     bsz = 1
@@ -856,14 +853,15 @@ def combine_dev_results_sbs(config, rank, world_size, device):
                         
                 torch.cuda.empty_cache()
             pbar.close()
+            
 
-if __name__ == "__main__":
-    
+def develop_dataset_multi_gpu():
     rank, world_size, device = init_distributed()
     
     
     # set the config
     config = {
+        'outdir': 'output/eval_dev',
         'lighting_augs': [
             # 'fixed_olat1', # 18s
             
@@ -939,3 +937,8 @@ if __name__ == "__main__":
     combine_dev_results_sbs(config, rank, world_size, device)
 
     cleanup()
+    
+if __name__ == "__main__":
+    # develop_dataset_multi_gpu()
+    
+    dry_run_multi_gpu()
