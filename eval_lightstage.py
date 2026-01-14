@@ -14,7 +14,7 @@ from ptflops import get_model_complexity_info
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../lotus')))
-from lotus.utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage, dry_run_multi_gpu
+from lotus.utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage, dry_run_multi_gpu, fit_disney_brdf_multi_gpu
 from lotus.utils.objaverse_dataset import ObjaverseDataset, collate_fn_objaverse
 import lotus.utils.visualize as vis_utils
 from lotus.train_lotus_g_rgb2x import rgb2x
@@ -941,4 +941,6 @@ def develop_dataset_multi_gpu():
 if __name__ == "__main__":
     # develop_dataset_multi_gpu()
     
-    dry_run_multi_gpu()
+    # dry_run_multi_gpu()
+    
+    fit_disney_brdf_multi_gpu()

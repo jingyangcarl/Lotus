@@ -1296,6 +1296,11 @@ def parse_args():
         help="The image file extension for lightstage dataset.",
     )
     parser.add_argument(
+        "--lightstage_use_cache",
+        action="store_true",
+        help="Whether to use cached lightstage data for faster training. Note: the cache may not exist initially. need to work with rewrite_cache option.",
+    )
+    parser.add_argument(
         "--mix_dataset",
         action="store_true",
         help='Whether to mix the training data from hypersim and vkitti'
@@ -2046,7 +2051,14 @@ def main():
     if db_prob["lightstage"] > 0:
         print("Loading lightstage dataset...")
         tik = time.time()
-        train_dataset_lightstage = LightstageDataset(split='train', tasks=args.task_name, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, lighting_aug_pair_n=args.lightstage_lighting_augmentation_pair_n,)
+        train_dataset_lightstage = LightstageDataset(
+            split='train', 
+            tasks=args.task_name, 
+            ori_aug_ratio=args.lightstage_original_augmentation_ratio, 
+            lighting_aug=args.lightstage_lighting_augmentation, 
+            lighting_aug_pair_n=args.lightstage_lighting_augmentation_pair_n,
+            use_cache=args.lightstage_use_cache
+        )
         train_dataloader_lightstage = torch.utils.data.DataLoader(
             train_dataset_lightstage,
             shuffle=True,
