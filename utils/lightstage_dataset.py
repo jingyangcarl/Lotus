@@ -13,8 +13,20 @@ from tqdm.rich import tqdm
 from torchvision import transforms
 import cv2
 import time
+import sys
 
-from disney_brdf import DisneyBRDF, DisneyBRDFSimplified, DisneyBRDFDiffuse, DisneyBRDFSpecular, DisneyParamConfig
+from disney_brdf import (
+    DisneyParamConfig, 
+    DisneyBRDFPrinciple, 
+    DisneyBRDFDiffuse, 
+    DisneyBRDFDiffuseSubsurface,
+    DisneyBRDFSpecular, 
+    DisneyBRDFSpecularClearcoat,
+    DisneyBRDFSimplified, 
+    DisneyBRDFSimplifiedMultiLayer,
+    hdr_to_ldr, 
+    hdr_to_ldr_torch
+)
 import torch.nn.functional as F
 
 def init_distributed():
@@ -35,6 +47,19 @@ def init_distributed():
 def cleanup():
     if dist.is_initialized():
         dist.destroy_process_group()
+        
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 class LightstageTransform:
     pass
@@ -51,24 +76,27 @@ class LightstageDataset(Dataset):
         eval_first_n_item=None, 
         eval_first_n_hdri=3, 
         eval_linsp_n_olat=346,
-        eval_specific_item=None, # when enabled, eval_first_n_item will be ignored, and only the specific item will be evaluated
+        eval_specific_items=None, # when enabled, eval_first_n_item will be ignored, and only the specific item will be evaluated
         eval_specific_cam=None, # only work when eval_specific_item is enabled, if not None, only the specific cam will be evaluated
-        img_ext='jpg', 
+        img_ext='exr', 
         n_rotations=1, 
         overexposure_remove=True,
         use_cache=False,
         rewrite_cache=False, # force update the caching files
         olat_cache_format='npy',
         hdri_cache_format='npy',
+        temp_out_path=None, # for debugging the dataset
     ):
 
         assert split in ['train', 'test', 'all'], f'Invalid split: {split}'
         self.split = split
         
+        self.dataset_name = 'lightstage'
         v = 'v1.3'
         self.root_dir = '/labworking/Users_A-L/jyang/data/LightStageObjectDB'
         self.root_dir = '/home/jyang/data/LightStageObjectDB' # local cache, no IO bottle neck
-        self.img_ext = img_ext # 'exr' or 'jpg' # TODO: jpg need to updated to compatible with negative values, running now
+        self.img_ext = img_ext # 'exr' or 'jpg'
+        print('jpg is proved to have poor performance on fitting tasks due to the lossy compression')
         # when use exr, the evaluation results may look different to the validation due to 
         # meta_data_path = f'{self.root_dir}/datasets/exr/train.json'
         # meta_data_path = f'{self.root_dir}/datasets/exr/{v}/{v}_2/train_512_.json'
@@ -89,7 +117,7 @@ class LightstageDataset(Dataset):
         self.eval_first_n_item = eval_first_n_item # number of olat to eval during testing
         self.eval_first_n_hdri = eval_first_n_hdri
         self.eval_first_n_olat = eval_linsp_n_olat
-        self.eval_specific_item = eval_specific_item
+        self.eval_specific_items = eval_specific_items
         self.eval_specific_cam = eval_specific_cam
         self.n_rotations = n_rotations # rotationo samples
         self.overexposure_remove = overexposure_remove
@@ -101,6 +129,9 @@ class LightstageDataset(Dataset):
         self.rewrite_cache = rewrite_cache
         self.olat_cache_format = olat_cache_format
         self.hdri_cache_format = hdri_cache_format
+        
+        self.compare_exr_jpg = False # for debugging the exr and jpg difference
+        self.temp_out_path = temp_out_path
         
         # load json file
         metadata = []
@@ -168,7 +199,7 @@ class LightstageDataset(Dataset):
                         # print(f'Skipping {row["obj"]} at cam{row["cam"]:02d} with {n_cross} cross lights and {n_paral} parallel lights, not equal lights for training.')
                         pass
                     metadata_.append(row)
-            print(f'Expanded metadata from #obj:{len(metadata)} x #light:{lighting_aug_count} x #aug_rat:{total_ratio} to {len(metadata_)} by adding lighting index, {expansion_counter} objects expanded.')
+            print(f'Expanded metadata from #obj:{len(metadata)} x #cam:8 x #light:{lighting_aug_count} x #aug_rat:{total_ratio} to {len(metadata_)} by adding lighting index, {expansion_counter} objects expanded.')
             metadata = metadata_
         else:
             assert False, f'Fitting dataset should only be used for diffusion or optimization tasks, got {self.tasks}'
@@ -270,7 +301,7 @@ class LightstageDataset(Dataset):
                 if not self.use_cache and self.rewrite_cache:
                     # when not use_cache and rewrite_cache, use all cameras
                     pass
-                elif metadata[rowidx]['cam'] != 7:
+                elif int(metadata[rowidx]['cam']) not in [1, 5, 7]:
                     # otherwise, only use cam07 for evaluation to reduce the testing time
                     continue
                 
@@ -441,7 +472,7 @@ class LightstageDataset(Dataset):
                 'fixed_hdri_olat43': 100.0,
                 'fixed_hdri_olat86': 50.0,
                 'fixed_hdri_olat173': 25.0,
-                'fixed_hdri_olat346': 12.5,
+                'fixed_hdri_olat346': 50.0,
                 # 'random_olat1+hdri_olat21': 100.0,
             } # this factor control3 the light source brightness, the higher the brighter
             self.olat_img_intensity = {
@@ -479,7 +510,7 @@ class LightstageDataset(Dataset):
                 assert False, 'Deprecated'
                 n_target_olat = self.lighting_augmentation_pair_n
                 olat_cross_path, olat_parallel_path, olat_wi_idx, olat_wi_dir, olat_wi_rgb, hdri_path = get_random_olat(n_target_olat, -16)
-            elif self.lighting_augmentation.startswith('fixed_olat'):
+            elif self.lighting_augmentation.startswith('fixed_olat') and '+' not in self.lighting_augmentation:
                 # Eval: fixed_olatX, generate fixed eval_first_n_olat olats using X olat each time
                 n_target_olat = self.eval_first_n_olat
                 n_olat_compose = self.lighting_augmentation.split('_')[-1]
@@ -534,6 +565,36 @@ class LightstageDataset(Dataset):
                     olat_img_intensity = olat_img_intensity_random + olat_img_intensity_hdri
                 
                 assert len(olat_cross_path) == self.lighting_augmentation_pair_n, f'olat_cross_path length {len(olat_cross_path)} does not match lighting_augmentation_pair_n {self.lighting_augmentation_pair_n}'
+            elif self.lighting_augmentation.startswith('fixed_olat') and 'hdri_olat' in self.lighting_augmentation:
+                # Eval: fixed_olatX+hdri_olatY, generate eval_first_n samples using X olats and Y hdris each time
+                n_olat_compose, n_olat_compose_ = self.lighting_augmentation.split('+')
+
+                n_olat_compose = int(n_olat_compose.replace('fixed_olat', ''))
+                n_target_olat = self.eval_first_n_olat
+                olat_cross_path_random, olat_parallel_path_random, olat_wi_idx_random, olat_wi_dir_random, olat_wi_rgb_random, hdri_path_random = get_fixed_olat(n_target_olat, n_olat_compose, self.olat_wi_rgb_intensity[f'fixed_olat{n_olat_compose}'])
+                olat_img_intensity_random = [self.olat_img_intensity[f'fixed_olat{n_olat_compose}']] * len(olat_wi_rgb_random)
+
+                n_target_hdri = self.eval_first_n_hdri
+                n_olat_compose_ = int(n_olat_compose_.replace('hdri_olat', ''))
+                olat_cross_path_hdri, olat_parallel_path_hdri, olat_wi_idx_hdri, olat_wi_dir_hdri, olat_wi_rgb_hdri, hdri_path_hdri = get_hdri(n_target_hdri, n_olat_compose_, self.olat_wi_rgb_intensity[f'fixed_hdri_olat{n_olat_compose_}'], mode='fixed')
+                olat_img_intensity_hdri = [self.olat_img_intensity[f'fixed_hdri_olat{n_olat_compose_}']] * len(olat_wi_rgb_hdri)
+
+                olat_cross_path = olat_cross_path_random + olat_cross_path_hdri
+                olat_parallel_path = olat_parallel_path_random + olat_parallel_path_hdri
+                olat_wi_idx = olat_wi_idx_random + olat_wi_idx_hdri
+                olat_wi_dir = olat_wi_dir_random + olat_wi_dir_hdri
+                olat_wi_rgb = olat_wi_rgb_random + olat_wi_rgb_hdri
+                hdri_path = hdri_path_random + hdri_path_hdri
+                olat_img_intensity = olat_img_intensity_random + olat_img_intensity_hdri
+            
+                shuffle_seed = 42
+                if shuffle_seed:
+                    # the eval will fetch all, therefore shuffle the order
+                    np.random.seed(shuffle_seed) # for reproducibility
+                    combined = list(zip(olat_cross_path, olat_parallel_path, olat_wi_idx, olat_wi_dir, olat_wi_rgb, hdri_path, olat_img_intensity))
+                    np.random.shuffle(combined)
+                    olat_cross_path[:], olat_parallel_path[:], olat_wi_idx[:], olat_wi_dir[:], olat_wi_rgb[:], hdri_path[:], olat_img_intensity[:] = zip(*combined)
+            
             else:
                 raise NotImplementedError(f'Lighting augmentation {self.lighting_augmentation} is not implemented')
             assert type(olat_cross_path) == list, f'cross_path should be a list, got {type(olat_cross_path)}'
@@ -576,9 +637,9 @@ class LightstageDataset(Dataset):
             self.olat_img_intensities.append(olat_img_intensity)
 
         # when enable quick_val, get the first 10 samples
-        if eval_first_n_item and split != 'train':
+        if split != 'train':
             
-            if eval_first_n_item:
+            if eval_first_n_item is not None:
 
                 # filter out the samples and crop by eval_first_n
                 assert len(self.metas) == len(self.objs) == len(self.camera_paths) == len(self.static_paths) == len(self.static_cross_paths) == len(self.static_parallel_paths) == len(self.olat_cross_paths) == len(self.olat_parallel_paths) == len(self.albedo_paths) == len(self.normal_paths) == len(self.specular_paths) == len(self.sigma_paths) == len(self.mask_paths), 'Length of texts, objs, camera_paths, static_paths, cross_paths, parallel_paths, albedo_paths, normal_paths, specular_paths, sigma_paths, mask_paths are not equal'
@@ -595,57 +656,6 @@ class LightstageDataset(Dataset):
                 eval_idx = eval_idx[:eval_first_n_item] if (eval_first_n_item < len(eval_idx) and eval_first_n_item > 0) else eval_idx
                 print(f'Evaluation: {split} set length is truncated from {len(self.metas)} to {len(eval_idx)}')
                 
-            
-            if self.eval_specific_item is not None:
-                
-                # check if 'woodball' is in the objs, put to the first when exist
-                assert self.eval_specific_item in self.objs, f'{self.eval_specific_item} is not in the objs: {self.objs}, this is for debugging purpose'
-                print('Ignoring eval_first_n_item and only evaluate the specific item: ', self.eval_specific_item)
-                assert self.eval_specific_cam in [0,1,2,3,4,5,6,7], f'Invalid eval_specific_cam {self.eval_specific_cam}, should be in [0,1,2,3,4,5,6,7]'
-                specific_item_idx = self.objs.index(self.eval_specific_item)
-                specific_cam_idx = 0 # TODO
-                specific_metas = [self.metas[specific_item_idx+self.eval_specific_cam]]
-                specific_objs = [self.objs[specific_item_idx+specific_cam_idx]]
-                specific_objs_mat = [self.objs_mat[specific_item_idx+specific_cam_idx]]
-                specific_objs_des = [self.objs_des[specific_item_idx+specific_cam_idx]]
-                specific_camera_paths = [self.camera_paths[specific_item_idx+specific_cam_idx]]
-                specific_static_paths = [self.static_paths[specific_item_idx+specific_cam_idx]]
-                specific_static_cross_paths = [self.static_cross_paths[specific_item_idx+specific_cam_idx]]
-                specific_static_parallel_paths = [self.static_parallel_paths[specific_item_idx+specific_cam_idx]]
-                specific_olat_cross_paths = [self.olat_cross_paths[specific_item_idx+specific_cam_idx]]
-                specific_olat_parallel_paths = [self.olat_parallel_paths[specific_item_idx+specific_cam_idx]]
-                specific_olat_wi_idxs = [self.olat_wi_idxs[specific_item_idx+specific_cam_idx]]
-                specific_olat_wi_dirs = [self.olat_wi_dirs[specific_item_idx+specific_cam_idx]]
-                specific_olat_wi_rgbs = [self.olat_wi_rgbs[specific_item_idx+specific_cam_idx]]
-                specific_albedo_paths = [self.albedo_paths[specific_item_idx+specific_cam_idx]]
-                specific_normal_paths = [self.normal_paths[specific_item_idx+specific_cam_idx]]
-                specific_specular_paths = [self.specular_paths[specific_item_idx+specific_cam_idx]]
-                specific_sigma_paths = [self.sigma_paths[specific_item_idx+specific_cam_idx]]
-                specific_mask_paths = [self.mask_paths[specific_item_idx+specific_cam_idx]]
-                specific_hdri_paths = [self.hdri_paths[specific_item_idx+specific_cam_idx]]
-                specific_olat_img_intensities = [self.olat_img_intensities[specific_item_idx+specific_cam_idx]]
-                
-                self.metas = specific_metas
-                self.objs = specific_objs
-                self.objs_mat = specific_objs_mat
-                self.objs_des = specific_objs_des
-                self.camera_paths = specific_camera_paths
-                self.static_paths = specific_static_paths
-                self.static_cross_paths = specific_static_cross_paths
-                self.static_parallel_paths = specific_static_parallel_paths
-                self.olat_cross_paths = specific_olat_cross_paths
-                self.olat_parallel_paths = specific_olat_parallel_paths
-                self.olat_wi_idxs = specific_olat_wi_idxs
-                self.olat_wi_dirs = specific_olat_wi_dirs
-                self.olat_wi_rgbs = specific_olat_wi_rgbs
-                self.albedo_paths = specific_albedo_paths
-                self.normal_paths = specific_normal_paths
-                self.specular_paths = specific_specular_paths
-                self.sigma_paths = specific_sigma_paths
-                self.mask_paths = specific_mask_paths
-                self.hdri_paths = specific_hdri_paths
-                self.olat_img_intensities = specific_olat_img_intensities
-            else:
                 # truncate to eval_first_n            
                 self.metas = [self.metas[i] for i in eval_idx]
                 self.objs = [self.objs[i] for i in eval_idx]
@@ -667,6 +677,64 @@ class LightstageDataset(Dataset):
                 self.mask_paths = [self.mask_paths[i] for i in eval_idx]
                 self.hdri_paths = [self.hdri_paths[i] for i in eval_idx]
                 self.olat_img_intensities = [self.olat_img_intensities[i] for i in eval_idx]
+            
+            elif self.eval_specific_items is not None:
+                
+                # check if 'woodball' is in the objs, put to the first when exist
+                assert all(item in self.objs for item in self.eval_specific_items), f'{self.eval_specific_items} is not in the objs: {self.objs}, this is for debugging purpose'
+                print('Ignoring eval_first_n_item and only evaluate the specific item: ', self.eval_specific_items)
+                assert self.eval_specific_cam in [0,1,2,3,4,5,6,7], f'Invalid eval_specific_cam {self.eval_specific_cam}, should be in [0,1,2,3,4,5,6,7]'
+                # specific_item_idx = self.objs.index(self.eval_specific_items)
+                # specific_cam_idx = 0 # TODO: make it compatible with different cam
+                
+                specific_item_idx = []
+                for i, m in enumerate(self.metas):
+                    for item in self.eval_specific_items:
+                        if m['obj'] == item and m['cam'] == self.eval_specific_cam and m['aug'] == 'static':
+                            specific_item_idx.append(i)
+                assert not len(specific_item_idx) == 0, f'No specific items found for {self.eval_specific_items} at cam {self.eval_specific_cam}'
+                
+                specific_metas = [self.metas[i] for i in specific_item_idx]
+                specific_objs = [self.objs[i] for i in specific_item_idx]
+                specific_objs_mat = [self.objs_mat[i] for i in specific_item_idx]
+                specific_objs_des = [self.objs_des[i] for i in specific_item_idx]
+                specific_camera_paths = [self.camera_paths[i] for i in specific_item_idx]
+                specific_static_paths = [self.static_paths[i] for i in specific_item_idx]
+                specific_static_cross_paths = [self.static_cross_paths[i] for i in specific_item_idx]
+                specific_static_parallel_paths = [self.static_parallel_paths[i] for i in specific_item_idx]
+                specific_olat_cross_paths = [self.olat_cross_paths[i] for i in specific_item_idx]
+                specific_olat_parallel_paths = [self.olat_parallel_paths[i] for i in specific_item_idx]
+                specific_olat_wi_idxs = [self.olat_wi_idxs[i] for i in specific_item_idx]
+                specific_olat_wi_dirs = [self.olat_wi_dirs[i] for i in specific_item_idx]
+                specific_olat_wi_rgbs = [self.olat_wi_rgbs[i] for i in specific_item_idx]
+                specific_albedo_paths = [self.albedo_paths[i] for i in specific_item_idx]
+                specific_normal_paths = [self.normal_paths[i] for i in specific_item_idx]
+                specific_specular_paths = [self.specular_paths[i] for i in specific_item_idx]
+                specific_sigma_paths = [self.sigma_paths[i] for i in specific_item_idx]
+                specific_mask_paths = [self.mask_paths[i] for i in specific_item_idx]
+                specific_hdri_paths = [self.hdri_paths[i] for i in specific_item_idx]
+                specific_olat_img_intensities = [self.olat_img_intensities[i] for i in specific_item_idx]
+                
+                self.metas = specific_metas
+                self.objs = specific_objs
+                self.objs_mat = specific_objs_mat
+                self.objs_des = specific_objs_des
+                self.camera_paths = specific_camera_paths
+                self.static_paths = specific_static_paths
+                self.static_cross_paths = specific_static_cross_paths
+                self.static_parallel_paths = specific_static_parallel_paths
+                self.olat_cross_paths = specific_olat_cross_paths
+                self.olat_parallel_paths = specific_olat_parallel_paths
+                self.olat_wi_idxs = specific_olat_wi_idxs
+                self.olat_wi_dirs = specific_olat_wi_dirs
+                self.olat_wi_rgbs = specific_olat_wi_rgbs
+                self.albedo_paths = specific_albedo_paths
+                self.normal_paths = specific_normal_paths
+                self.specular_paths = specific_specular_paths
+                self.sigma_paths = specific_sigma_paths
+                self.mask_paths = specific_mask_paths
+                self.hdri_paths = specific_hdri_paths
+                self.olat_img_intensities = specific_olat_img_intensities
 
 
         self.transforms = transforms.Compose(
@@ -987,7 +1055,8 @@ class LightstageDataset(Dataset):
             out.cpu().numpy(),
             diff.cpu().numpy()
         )
-    
+        
+
     def __getitem__(self, idx):
         example = {}
         
@@ -1099,15 +1168,18 @@ class LightstageDataset(Dataset):
                 k = 1
             else:
                 k = 0
+                
+            # cache_suffix = len(olat_paths)
+            cache_suffix = 346 # number lock
 
             if self.olat_cache_format == 'npz_compress':
-                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{len(olat_paths)}_k{k}.npz')
+                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{cache_suffix}_k{k}.npz')
             elif self.olat_cache_format == 'npz':
-                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{len(olat_paths)}_k{k}.uncompressed.npz')
+                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{cache_suffix}_k{k}.uncompressed.npz')
             elif self.olat_cache_format == 'npy':
-                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{len(olat_paths)}_k{k}.npy')
+                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{cache_suffix}_k{k}.npy')
             elif self.olat_cache_format == 'pt':
-                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{len(olat_paths)}_k{k}.pt')
+                cache_path = os.path.join(f'{os.path.dirname(olat_paths[0])}_npz', f'{cache_suffix}_k{k}.pt')
 
             if os.path.exists(cache_path) and self.use_cache:
                 if self.olat_cache_format == 'pt':
@@ -1144,12 +1216,16 @@ class LightstageDataset(Dataset):
 
             return olat_processed.to('cuda')
             
+        # the following lighting synthesis will all be the same object, therefore only to load the olat once
+        # when single olat, mask out unused lights
+        crosses_shared = get_stacked_raw_olat(olat_cross_paths[0], olat_img_intensities[0])
+        parallels_shared = get_stacked_raw_olat(olat_parallel_paths[0], olat_img_intensities[0])
+        assert crosses_shared.shape[0] == 346, f'olat_cross shape {crosses_shared.shape} not match 346, insufficient olat may cause the wrong lighting synthesis.'
 
-        if self.lighting_augmentation.startswith('fixed_hdri') or 'olat346' in self.lighting_augmentation:
-            # in this mode, usually all the crosses/parallls share the same olat paths as the item is per object
-            crosses_shared = get_stacked_raw_olat(olat_cross_paths[0], olat_img_intensities[0])
-            parallels_shared = get_stacked_raw_olat(olat_parallel_paths[0], olat_img_intensities[0])
-
+        self.compare_exr_jpg = False if self.temp_out_path else False
+        if self.compare_exr_jpg:
+            comparison_buffer = []
+        
         # N_augmented = len(olat_cross_paths) if self.split == 'train' else self.lighting_augmentation_pair_n # when rot is available, the following will block the dataloader
         N_augmented = len(olat_cross_paths)
         tik = time.time()
@@ -1168,25 +1244,67 @@ class LightstageDataset(Dataset):
                 # when load 346 olat during training with len(olat_cross_paths) == 2, 8 dataloader worker, it takes: (measured on vgldgx01 with two experiments running simultaneously)
                 # - 3 sample / min with caching (2:28:00 for 482 samples)
                 # 0.85 sample / min without caching (2:28:00 for 127 samples)
-                crosses = get_stacked_raw_olat(olat_cross_paths[i], olat_img_intensities[i])
-                parallels = get_stacked_raw_olat(olat_parallel_paths[i], olat_img_intensities[i])
+                # crosses = get_stacked_raw_olat(olat_cross_paths[i], olat_img_intensities[i])
+                # parallels = get_stacked_raw_olat(olat_parallel_paths[i], olat_img_intensities[i])
+                crosses = crosses_shared
+                parallels = parallels_shared
                 hdri_in_olats = np.stack([self.get_olat_hdri(j) for j in olat_omega_i_idxs[i]], axis=0)
                 
             # weighted sum by olat omega_i rgb
-            olat_omega_i_rgb = torch.from_numpy(olat_omega_i_rgbs[i]).to(crosses.dtype).to(crosses.device) # (n, 3)
-            olat_omega_i_dir = torch.from_numpy(np.stack(olat_omega_i_dirs[i], axis=0)).to(crosses.dtype).to(crosses.device) # (n, 3)
+            if len(olat_omega_i_idxs[i]) != 346:
+                olat_omega_i_rgb = torch.zeros(346, 3, dtype=crosses.dtype, device=crosses.device)
+                olat_omega_i_dir = torch.zeros(346, 3, dtype=crosses.dtype, device=crosses.device)
+                for oi in range(len(olat_omega_i_idxs[i])):
+                    olat_idx = olat_omega_i_idxs[i][oi]
+                    olat_omega_i_rgb[olat_idx] = torch.from_numpy(olat_omega_i_rgbs[i][oi]).to(crosses.dtype).to(crosses.device)
+                    olat_omega_i_dir[olat_idx] = torch.from_numpy(olat_omega_i_dirs[i][oi]).to(crosses.dtype).to(crosses.device)
+            else:
+                olat_omega_i_rgb = torch.from_numpy(olat_omega_i_rgbs[i]).to(crosses.dtype).to(crosses.device) # (n, 3)
+                olat_omega_i_dir = torch.from_numpy(np.stack(olat_omega_i_dirs[i], axis=0)).to(crosses.dtype).to(crosses.device) # (n, 3)
+                    
+            assert olat_omega_i_rgb.shape[0] == 346, f'olat_omega_i_rgb shape {olat_omega_i_rgb.shape} not match 346, insufficient olat may cause the wrong lighting synthesis.'
+            olat_omega_i_rgbs[i] = olat_omega_i_rgb.cpu().numpy()
+            olat_omega_i_dirs[i] = olat_omega_i_dir.cpu().numpy()
+            
             hdri_in_olats = torch.from_numpy(hdri_in_olats).to(crosses.dtype).to(crosses.device) # (h, w, c)
             cross.append(torch.einsum('nhwc,nc->hwc', crosses, olat_omega_i_rgb)) # weighted sum on cross olat images
             parallel.append(torch.einsum('nhwc,nc->hwc', parallels, olat_omega_i_rgb)) # weighted sum on parallel olat images
             hdri_in_olat_imgs.append(torch.einsum('nhwc,nc->hwc', hdri_in_olats, olat_omega_i_rgb)) # weighted sum on hdri images
             nDotL = torch.einsum('nc,hwc->nhw', olat_omega_i_dir, torch.from_numpy(normal_c2w).to(crosses.dtype).to(crosses.device)) # (n, h, w)
             irradiance.append(torch.einsum('nhw,nc->hwc', torch.maximum(nDotL, torch.tensor(0.0)), olat_omega_i_rgb)) # (h, w, c), use cross weights as they are usually positive
-            hdri_imgs.append(hdri_in_olat_imgs[-1] if not hdri_path[i] else torch.from_numpy(cv2.resize(imageio.imread(hdri_path[i]) / 255.0, (hdri_in_olat_imgs[-1].shape[1], hdri_in_olat_imgs[-1].shape[0])))) # load hdri if hdri_path is given
+            hdri_imgs.append(hdri_in_olat_imgs[-1].cpu() if not hdri_path[i] else torch.from_numpy(cv2.resize(imageio.imread(hdri_path[i]) / 255.0, (hdri_in_olat_imgs[-1].shape[1], hdri_in_olat_imgs[-1].shape[0])))) # load hdri if hdri_path is given
             # if '-random' in self.lighting_augmentation:
             #     # remove the first one as the first one is usually over exposed
             #     parallel_stacked.append(torch.hstack(parallels[1:]) if len(parallels) > 2 else parallels[0])
             # else:
             #     parallel_stacked.append(torch.flatten(parallels, 0, 1) if len(parallels) > 1 else parallels[0]) # for visualization purpose
+        
+            # need to compare the following in fixed_olat1 and fixed_hdri_olat346:
+            # 1. exr space weighted sum and further apply the hdr2ldr vs 
+            # 2. jpg space weighted sum
+            if self.compare_exr_jpg and '.exr' in olat_cross_paths[i][0]:
+                olat_cross_path_jpg = [p.replace('/exr/', '/jpg/').replace('.exr', '.jpg') for p in olat_cross_paths[i]]
+                olat_parallel_path_jpg = [p.replace('/exr/', '/jpg/').replace('.exr', '.jpg') for p in olat_parallel_paths[i]]
+                crosses_jpg = get_stacked_raw_olat(olat_cross_path_jpg, olat_img_intensities[i]).to(crosses.dtype)
+                parallels_jpg = get_stacked_raw_olat(olat_parallel_path_jpg, olat_img_intensities[i]).to(crosses.dtype)
+                cross_jpg = torch.einsum('nhwc,nc->hwc', crosses_jpg, olat_omega_i_rgb)
+                parallel_jpg = torch.einsum('nhwc,nc->hwc', parallels_jpg, olat_omega_i_rgb)
+                
+                cross_hdr2ldr = hdr_to_ldr(cross[-1].cpu().numpy())
+                parallel_hdr2ldr = hdr_to_ldr(parallel[-1].cpu().numpy())
+                comparison = np.concatenate([cross_jpg.cpu().numpy(), cross_hdr2ldr, parallel_jpg.cpu().numpy(), parallel_hdr2ldr], axis=1)
+                comparison_path = f'{self.temp_out_path}/{self.dataset_name}/{self.objs[idx]}/{self.lighting_augmentation}/comparison/exr_vs_jpg/s{idx}_l{i}.jpg'
+                os.makedirs(os.path.dirname(comparison_path), exist_ok=True)
+                imageio.imwrite(comparison_path, (comparison * 255).astype(np.uint8))
+                comparison_buffer.append((comparison * 255).astype(np.uint8))
+                
+                # conclusion: using exr with hdr2ldr shows better quality, however, the intensity is all normalized within the current image, causing 
+                # 1. intensity not proportional to intensity in different lighting conditions.
+                # 2. wrong brdf estimation.
+                
+                # TODO:
+                # 1. regardless the lighting, loading one olat chunk at a time, and normalize the olat chunk
+                # 2. don't get rid of the "overexposured" values
         
             if time.time() - tik > 10 and i%10 == 0:
                 # warn for loeading too long per sample, usually in fixed_ mode, this is expected
@@ -1195,11 +1313,28 @@ class LightstageDataset(Dataset):
                 else:
                     assert False, 'Per Sampling Loading is too slow, not able to train.'
             
-        cross = torch.stack(cross) if len(cross) > 1 else cross[0] # (n, h, w, c)
-        parallel = torch.stack(parallel) if len(parallel) > 1 else parallel[0]
+        if self.compare_exr_jpg:
+            comparison_path = f'{self.temp_out_path}/{self.dataset_name}/{self.objs[idx]}/{self.lighting_augmentation}/comparison/exr_vs_jpg_all.mp4'
+            try:
+                imageio.mimwrite(comparison_path, comparison_buffer, fps=2)
+            except Exception as e:
+                print(f'Failed to write video comparison for sample {idx} due to {e}, skip.')
+            
+            comparison_buffer = np.stack(comparison_buffer, axis=0)
+            comparison_path = f'{self.temp_out_path}/{self.dataset_name}/{self.objs[idx]}/{self.lighting_augmentation}/comparison/exr_vs_jpg_all.jpg'
+            try:
+                imageio.imwrite(comparison_path, comparison_buffer.reshape(-1, comparison_buffer.shape[-2], comparison_buffer.shape[-1]))
+            except Exception as e:
+                print(f'Failed to write video comparison for sample {idx} due to {e}, skip.')
+            
+        cross = [hdr_to_ldr(c.cpu().numpy()) if torch.is_tensor(c) else hdr_to_ldr(c) for c in cross]
+        parallel = [hdr_to_ldr(p.cpu().numpy()) if torch.is_tensor(p) else hdr_to_ldr(p) for p in parallel]
+            
+        cross = np.stack(cross) if len(cross) > 1 else cross[0] # (n, h, w, c)
+        parallel = np.stack(parallel) if len(parallel) > 1 else parallel[0]
         irradiance = torch.stack(irradiance) if len(irradiance) > 1 else irradiance[0]
         hdri_in_olat_imgs = torch.stack(hdri_in_olat_imgs) if len(hdri_in_olat_imgs) > 1 else hdri_in_olat_imgs[0]
-        hdri_imgs = torch.stack(hdri_imgs) if hdri_imgs[0].device == cross.device else torch.from_numpy(np.stack(hdri_imgs, axis=0)).to(cross.dtype).to(cross.device) # (n, h, w, c)
+        hdri_imgs = torch.stack(hdri_imgs)
 
         # parallel_stacked_max_shape = np.max([np.array(a.shape) for a in parallel_stacked], axis=0)
         # parallel_stacked = np.vstack([
@@ -1208,15 +1343,27 @@ class LightstageDataset(Dataset):
         # ]) if len(parallel_stacked) > 1 else parallel_stacked[0]  # for visualization purpose
         
         # hdr to ldr via Apply simple Reinhard tone mapping
+        
+        static = hdr_to_ldr(static) if '.exr' in static_path else static.clip(0, 1)
+        static_cross = hdr_to_ldr(static_cross) if '.exr' in static_cross_path else static_cross.clip(0, 1)
+        static_parallel = hdr_to_ldr(static_parallel) if '.exr' in static_parallel_path else static_parallel.clip(0, 1)
+        # cross = hdr_to_ldr(cross.cpu().numpy()) if torch.is_tensor(cross) else cross.clip(0, 1)
+        # parallel = hdr_to_ldr(parallel.cpu().numpy()) if torch.is_tensor(parallel) else parallel.clip(0, 1)
+        irradiance = irradiance.cpu().numpy()
+        albedo = hdr_to_ldr(albedo) if '.exr' in albedo_path else albedo.clip(0, 1)
+        specular = hdr_to_ldr(specular) if '.exr' in specular_path else specular.clip(0, 1)
+        sigma = hdr_to_ldr(sigma) if '.exr' in sigma_path else sigma.clip(0, 1)
+        mask = mask.clip(0, 1)
+        
         # static = self.tonemap.process(static)
         # static = static.clip(0, 1)
-        cross = cross.clip(0, 1)
-        parallel = parallel.clip(0, 1)
-        irradiance = irradiance.clip(0, 1)
-        albedo = albedo.clip(0, 1)
-        specular = specular.clip(0, 1)
-        sigma = sigma.clip(0, 1) / 10. # the decomposition used 10 as a clipping factor
-        mask = mask.clip(0, 1)
+        # cross = cross.clip(0, 1)
+        # parallel = parallel.clip(0, 1)
+        # irradiance = irradiance.clip(0, 1)
+        # albedo = albedo.clip(0, 1)
+        # specular = specular.clip(0, 1)
+        # sigma = sigma.clip(0, 1) / 10. # the decomposition used 10 as a clipping factor
+        # mask = mask.clip(0, 1)
         
         # [0,1] to [-1,1], as the output will be used for the training of diffusion model
         static = (static - 0.5) * 2.0
@@ -1234,13 +1381,13 @@ class LightstageDataset(Dataset):
         static = np.nan_to_num(static)
         static_cross = np.nan_to_num(static_cross)
         static_parallel = np.nan_to_num(static_parallel)
-        cross = torch.nan_to_num(cross)
-        parallel = torch.nan_to_num(parallel)
+        cross = np.nan_to_num(cross)
+        parallel = np.nan_to_num(parallel)
         albedo = np.nan_to_num(albedo)
         normal_c2w = np.nan_to_num(normal_c2w)
         specular = np.nan_to_num(specular)
         sigma = np.nan_to_num(sigma)
-        irradiance = torch.nan_to_num(irradiance)
+        irradiance = np.nan_to_num(irradiance)
         mask = np.nan_to_num(mask)
 
         # swap x and z to align with the lotus/rgb2x
@@ -1252,36 +1399,18 @@ class LightstageDataset(Dataset):
         normal_w2c = np.einsum('ij, hwi -> hwj', R, normal_c2w)
         normal_rgb2x_w2c = normal_w2c.copy()
         normal_rgb2x_w2c[:,:,0] *= -1.
-        
-        def hdr_to_ldr(hdr, percentile=95, gamma=2.2, return_int8=False):
-            """Convert HDR image to LDR using percentile-based tone mapping."""
-            # Compute the percentile value for normalization
-            max_val = np.percentile(hdr, percentile)
-            # Normalize and clip the values to [0, 1]
-            ldr = np.clip(hdr / max_val, 0, 1)
-            # Apply gamma correction
-            ldr = ldr ** (1.0 / gamma)
-            # Scale to [0, 255] and convert to uint8
-            if return_int8:
-                ldr = (ldr * 255).astype(np.uint8)
-            return ldr
-        
-        if 'exr' in static_path:
-            # static is already in [0, 1] range, but we apply tone mapping for consistency
-            static = hdr_to_ldr(static)
-            static_cross = hdr_to_ldr(static_cross)
-            static_parallel = hdr_to_ldr(static_parallel)
-        if 'exr' in olat_cross_paths[0]:
-            albedo = hdr_to_ldr(albedo)
             
 
         # apply transforms
         static = self.transforms(static)
         static_cross = self.transforms(static_cross)
         static_parallel = self.transforms(static_parallel)
-        cross = cross.moveaxis(3,1).detach().cpu()
-        parallel = parallel.moveaxis(3,1).detach().cpu()
-        irradiance = irradiance.moveaxis(3,1).detach().cpu()
+        # cross = cross.moveaxis(3,1).detach().cpu()
+        # parallel = parallel.moveaxis(3,1).detach().cpu()
+        # irradiance = irradiance.moveaxis(3,1).detach().cpu()
+        cross = torch.from_numpy(cross).moveaxis(3,1).float()
+        parallel = torch.from_numpy(parallel).moveaxis(3,1).float()
+        irradiance = torch.from_numpy(irradiance).moveaxis(3,1).float()
         hdri_in_olat_imgs = hdri_in_olat_imgs.moveaxis(3,1).detach().cpu()
         hdri_imgs = hdri_imgs.moveaxis(3,1).detach().cpu()
         albedo = self.transforms(albedo)
@@ -1316,6 +1445,7 @@ class LightstageDataset(Dataset):
         example['omega_i_rgb'] = torch.from_numpy(np.stack(olat_omega_i_rgbs))
         example['omega_i_dir'] = torch.from_numpy(np.stack(olat_omega_i_dirs))
         # example['parallel_value_hstacked'] = parallel_stacked
+        # imageio.imwrite('/home/jyang/projects/ObjectReal/external/lotus/output/optimization_dev/lightstage/fixed_olat1/concrete1/debug.png', (hdri_in_olat_imgs[0].numpy().transpose(1,2,0)*255.).astype(np.uint8))
         
         return example
     
@@ -1468,11 +1598,12 @@ def collate_fn_lightstage(examples):
     }
     
 
+
 def build_dataloader(
     dataset_name, 
     ori_aug_ratio, 
     lighting_aug, 
-    first_n, 
+    first_n_item, 
     first_n_hdri, 
     linsp_n_olat,
     n_rot, 
@@ -1483,14 +1614,15 @@ def build_dataloader(
     use_cache=True, 
     rewrite_cache=False, 
     specific_item=None, 
-    specific_cam=None
+    specific_cam=None,
+    temp_out_path=None,
 ):
 
     dataset = LightstageDataset(
         split='all', 
         ori_aug_ratio=ori_aug_ratio, 
         lighting_aug=lighting_aug, 
-        eval_first_n_item=first_n, 
+        eval_first_n_item=first_n_item, 
         eval_first_n_hdri=first_n_hdri, 
         eval_linsp_n_olat=linsp_n_olat,
         n_rotations=n_rot, 
@@ -1498,8 +1630,9 @@ def build_dataloader(
         use_cache=use_cache,
         rewrite_cache=rewrite_cache, # initialization for the first time
         olat_cache_format='npy',
-        eval_specific_item=specific_item,
+        eval_specific_items=specific_item,
         eval_specific_cam=specific_cam,
+        temp_out_path=temp_out_path,
     )
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
     dataloader = DataLoader(
@@ -1518,26 +1651,39 @@ def dry_run(config, rank, world_size, device):
     
     datasets = config['datasets']
     lighting_augs = config['lighting_augs']
+    lighting_aug_ratio = config.get('lighting_aug_ratio', '1:0:0')
     irradiance_levels = config.get('irradiance_levels')
     overexposure_remove = config.get('overexposure_remove', False)
-
-
     outdir = config.get('outdir', 'output/eval_dev')
     bsz = 1
         
     for dataset_name in datasets:
         for lighting_aug in lighting_augs:
             exp_name = lighting_aug
-            first_n = config['first_n_item'].get(dataset_name, -1)
+            first_n_item = config['first_n_item'].get(dataset_name, -1)
             first_n_hdri = config['first_n_hdri'].get(dataset_name, -1)
+            linsp_n_olat = config['linsp_n_olat'].get(dataset_name, -1)
             n_rot = 1
             if 'rot' in lighting_aug:
                 n_rot = int(lighting_aug.split('_rot')[-1])
                 lighting_aug = lighting_aug.split('_rot')[0]
             irradiance_level = irradiance_levels[dataset_name][lighting_aug]
 
-
-            dataloader = build_dataloader(dataset_name, "1:1:1", lighting_aug, first_n, first_n_hdri, n_rot, overexposure_remove, rank, world_size, bsz=bsz)
+            dataloader = build_dataloader(
+                dataset_name, 
+                lighting_aug_ratio,
+                lighting_aug, 
+                first_n_item, 
+                first_n_hdri, 
+                linsp_n_olat,
+                n_rot, 
+                overexposure_remove, 
+                rank, 
+                world_size, 
+                bsz=bsz,
+                use_cache=True,
+                rewrite_cache=False,
+            )
 
             n_samples = len(dataloader)
             iter_dataloader = iter(dataloader)
@@ -1550,7 +1696,11 @@ def dry_run(config, rank, world_size, device):
                 
                 img_pairs = [data_dict['static_values'][bsz-1]] # static image first
                 img_pairs += [parallel_img for parallel_img in data_dict['parallel_values'][bsz-1]] # and then the parallel images
-                assert len(img_pairs) == (first_n_hdri * n_rot + 1), f"Expected {first_n_hdri * n_rot + 1} images, but got {len(img_pairs)}"
+                if 'fixed_hdri_olat' in lighting_aug:
+                    assert len(img_pairs) == (first_n_hdri * n_rot + 1), f"Expected {first_n_hdri * n_rot + 1} images, but got {len(img_pairs)}"
+                else:
+                    assert False, "Dry run is only implemented for fixed_hdri_olat lighting augmentation."
+                    
                 for pidx, img_ in enumerate(img_pairs):
                     pbar.update(1)
                     torch.cuda.empty_cache()
@@ -1569,6 +1719,7 @@ def dry_run_multi_gpu():
             # 'fixed_hdri_olat346_rot36', # 36s per light
             # 'fixed_hdri_olat346_rot72', # 72s per light
         ],
+        'lighting_aug_ratio': '1:1:1',
         'datasets': ['lightstage'],
         'irradiance_levels': {
             'lightstage': {
@@ -1592,22 +1743,21 @@ def dry_run_multi_gpu():
             # fixed number split across gpu
             # 'lightstage': 15,
         },
-        
         'first_n_hdri': {
             'lightstage': 2,
-            
-            # more, 40 wil failed in limited GPU memory
-            # 'lightstage': 10,
+        },
+        'linsp_n_olat': {
+            'lightstage': 21, # only in fixed_olat mode
         },
         'overexposure_remove': True,
     }
     
     
     # full 
-    # config['overexposure_remove'] = False
-    # dry_run(config, rank, world_size, device)
-    config['overexposure_remove'] = True
+    config['overexposure_remove'] = False
     dry_run(config, rank, world_size, device)
+    # config['overexposure_remove'] = True
+    # dry_run(config, rank, world_size, device)
 
     cleanup()
     
@@ -1698,8 +1848,10 @@ def fit_disney_brdf(config, rank, world_size, device):
 
     datasets = config['datasets']
     lighting_augs = config['lighting_augs']
-    lighting_aug_ratio = config.get('lighting_aug_ratio', '1:0:0')
+    # lighting_aug_ratio = config.get('lighting_aug_ratio', '1:0:0')
     irradiance_levels = config.get('irradiance_levels')
+    brdfs = config.get('brdfs', ['principle'])
+    polarizations = config.get('polarizations', ['parallel'])
     overexposure_remove = config.get('overexposure_remove', False)
     outdir = config.get('outdir', 'output/optimization_dev')
     bsz = 1
@@ -1707,7 +1859,8 @@ def fit_disney_brdf(config, rank, world_size, device):
     batch_imgs = int(config.get("bch", 1))
     lr = float(config.get("lr", 2e-2))
     n_epochs = int(config.get("epochs", 30))
-    brdf = str(config.get("brdf", 'principle'))
+    save_every = int(config.get("save_every", 10))
+    max_vis = int(config.get("max_vis", 8))
 
     # regularization weights (tune as needed)
     w_tv_normal = float(config.get("w_tv_normal", 1e-3))
@@ -1715,8 +1868,10 @@ def fit_disney_brdf(config, rank, world_size, device):
     w_prior_rough = float(config.get("w_prior_rough", 1e-4))
         
     for dataset_name in datasets:
-        for lighting_aug in lighting_augs:
-            exp_name = lighting_aug
+        
+        settings = []
+        settings_label = []
+        for (lighting_aug, lighting_aug_ratio) in lighting_augs:
             first_n_item = config['first_n_item'].get(dataset_name, -1)
             first_n_hdri = config['first_n_hdri'].get(dataset_name, -1)
             linsp_n_olat = config['linsp_n_olat'].get(dataset_name, -1)
@@ -1742,6 +1897,7 @@ def fit_disney_brdf(config, rank, world_size, device):
                 bsz=bsz,
                 specific_item=specific_item,
                 specific_cam=specific_cam,
+                temp_out_path=outdir
             )
 
             n_samples = len(dataloader)
@@ -1749,21 +1905,24 @@ def fit_disney_brdf(config, rank, world_size, device):
             for i in range(n_samples):
                 
                 # get data
-                print(f"[{dataset_name}][{exp_name}] Loading sample {i+1}/{n_samples}")
+                print(f"[{dataset_name}][{lighting_aug}] Loading sample {i+1}/{n_samples}")
                 tik = time.time()
                 data_dict = next(iter_dataloader)
                 assert bsz == 1, "Batch size greater than 1 is not supported in dry run."
-                print(f"[{dataset_name}][{exp_name}] Loaded sample {i+1}/{n_samples} in {time.time() - tik:.2f} seconds")
+                print(f"[{dataset_name}][{lighting_aug}] Loaded sample {i+1}/{n_samples} in {time.time() - tik:.2f} seconds")
                 
                 obj_name = data_dict['objs'][bsz-1]
                 img_pairs = [data_dict['static_values'][bsz-1] * 0.5 + 0.5] # static image first
-                tgt_all = [parallel_img * 0.5 + 0.5 for parallel_img in data_dict['parallel_values'][bsz-1]] # and then the parallel images
-                img_pairs += tgt_all
-                if 'fixed_hdri_olat' in lighting_aug:
-                    assert len(img_pairs) == (first_n_hdri * n_rot + 1), f"Expected {first_n_hdri * n_rot + 1} images, but got {len(img_pairs)}"
-                elif 'fixed_olat' in lighting_aug:
-                    assert len(img_pairs) == (linsp_n_olat + 1), f"Expected {linsp_n_olat + 1} images, but got {len(img_pairs)}"
-                tgt_all = torch.stack(tgt_all).to(device, non_blocking=True) # (N, 3, H, W)
+                tgt_parallel_all = [parallel_img * 0.5 + 0.5 for parallel_img in data_dict['parallel_values'][bsz-1]] # and then the parallel images
+                tgt_cross_all = [cross_img * 0.5 + 0.5 for cross_img in data_dict['cross_values'][bsz-1]] # and then the cross images
+                if 'fixed_hdri_olat' in lighting_aug and '+' not in lighting_aug:
+                    assert len(tgt_parallel_all) == (first_n_hdri * n_rot), f"Expected {first_n_hdri * n_rot} images, but got {len(tgt_parallel_all)}"
+                elif 'fixed_olat' in lighting_aug and '+' not in lighting_aug:
+                    assert len(tgt_parallel_all) == (linsp_n_olat), f"Expected {linsp_n_olat} images, but got {len(tgt_parallel_all)}"
+                elif 'fixed_olat' in lighting_aug and 'hdri_olat' in lighting_aug:
+                    assert len(tgt_parallel_all) == (first_n_hdri * n_rot + linsp_n_olat), f"Expected {first_n_hdri * n_rot + linsp_n_olat} images, but got {len(tgt_parallel_all)}"
+                tgt_parallel_all = torch.stack(tgt_parallel_all).to(device, non_blocking=True) # (N, 3, H, W)
+                tgt_cross_all = torch.stack(tgt_cross_all).to(device, non_blocking=True) # (N, 3, H, W)
                 
                 V = -data_dict['view_dir_values'][bsz-1][0].to(device) # H, W, 3
                 L_dir = data_dict['omega_i_dirs'][bsz-1].to(device) # B, N, 3
@@ -1771,119 +1930,259 @@ def fit_disney_brdf(config, rank, world_size, device):
                 mask = data_dict['valid_mask_values'][bsz-1][0].to(device) # H, W
                 H, W = V.shape[0], V.shape[1]
                 
-                # build model per-object (common for per-object fitting)
-                param_cfg = DisneyParamConfig(per_pixel=True)
-                if brdf == 'principle':
-                    model = DisneyBRDF(H, W, device=device, cfg=param_cfg).to(device)
-                elif brdf == 'simplified':
-                    model = DisneyBRDFSimplified(H, W, device=device, cfg=param_cfg).to(device)
-                elif brdf == 'diffuse':
-                    model = DisneyBRDFDiffuse(H, W, device=device, cfg=param_cfg).to(device)
-                elif brdf == 'specular':
-                    model = DisneyBRDFSpecular(H, W, device=device, cfg=param_cfg).to(device)
-                else:
-                    raise ValueError(f"Unknown BRDF type: {brdf}")
-                model._print_param_stats()
-                
-                # initialize from your static image (or a diffuse estimate)
-                base0 = _ensure_chw(img_pairs[0]).float().to(device)  # (3,H,W), [0,1]
-                model.init_basecolor_from_image(base0)
+                for brdf in brdfs:
                     
-                # optimizer
-                optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-                
-                # (optional) AMP
-                use_amp = bool(config.get("amp", False))
-                scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-                
-                print(f"[{dataset_name}][{exp_name}][{obj_name}] Starting optimization with {len(tgt_all)} target images per epoch, {n_epochs} epochs, batch size {batch_imgs}, learning rate {lr}, use_amp={use_amp}")
-                for epoch in range(n_epochs):
-                    tik = time.time()
-                    epoch_loss = 0.0
-                    
-                    perm = torch.randperm(len(tgt_all), device=device)
-                    M = len(tgt_all)
-                    
-                    for s in range(0, M, batch_imgs):
-                        idx = perm[s:s+batch_imgs]  # (b,)
+                    for polarization in polarizations:
+                        
+                        # build model per-object (common for per-object fitting)
+                        param_cfg = DisneyParamConfig(per_pixel=True)
+                        if brdf == 'diffuse':
+                            model = DisneyBRDFDiffuse(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'diffuse-with-subsurface':
+                            model = DisneyBRDFDiffuseSubsurface(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'specular':
+                            model = DisneyBRDFSpecular(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'specular-with-clearcoat':
+                            model = DisneyBRDFSpecularClearcoat(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'simplified':
+                            model = DisneyBRDFSimplified(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'simplified-multilayer':
+                            model = DisneyBRDFSimplifiedMultiLayer(H, W, device=device, cfg=param_cfg).to(device)
+                        elif brdf == 'principle':
+                            model = DisneyBRDFPrinciple(H, W, device=device, cfg=param_cfg).to(device)
+                        else:
+                            raise ValueError(f"Unknown BRDF type: {brdf}")
+                        model._print_param_stats()
+                        
+                        # initialize from your static image (or a diffuse estimate)
+                        base0 = _ensure_chw(img_pairs[0]).float().to(device)  # (3,H,W), [0,1]
+                        model.init_basecolor_from_image(base0)
+                            
+                        # optimizer
+                        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+                        
+                        # (optional) AMP
+                        use_amp = bool(config.get("amp", False))
+                        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+                        
+                        out_obj_dir = os.path.join(outdir, dataset_name, obj_name)
+                        out_setting_dir = os.path.join(out_obj_dir, lighting_aug, brdf, polarization)
+                        os.makedirs(out_setting_dir, exist_ok=True)
+                        settings.append(out_setting_dir)
+                        settings_label.append(f"{lighting_aug}\n{brdf}\n{polarization}")
+                        log_file = open(os.path.join(out_setting_dir, f'log.txt'), 'w', buffering=1)
+                        sys.stdout = Tee(sys.__stdout__, log_file)
+                        sys.stderr = Tee(sys.__stderr__, log_file)
+                        
+                        # define the function
+                        def _select_variant(polarization: str):
+                            # returns: (do_parallel, do_cross, variant_cls_for_cross or None)
+                            if polarization == "parallel":
+                                return True, False, None
+                            if polarization == "cross":
+                                return False, True, None
+                            if polarization.startswith("parallel+cross"):
+                                if "(diffuse)" in polarization:
+                                    return True, True, DisneyBRDFDiffuse
+                                if "(diffuse-with-subsurface)" in polarization:
+                                    return True, True, DisneyBRDFDiffuseSubsurface
+                                raise ValueError(f"Unknown polarization variant: {polarization}")
+                            raise ValueError(f"Unknown polarization mode: {polarization}")
+                        
+                        def regularizer(P: dict) -> torch.Tensor:
+                            """
+                            Regularizers (keep minimal):
+                            1) reduce noise (TV on normal/baseColor)
+                            2) placeholder for future terms
+                            """
+                            reg = torch.tensor(0.0, device=P["normal"].device, dtype=P["normal"].dtype)
 
-                        tgt = tgt_all.index_select(0, idx)           # (b,3,H,W)
-                        L_dir_batch = L_dir.index_select(0, idx)     # (b,N,3)
-                        L_rgb_batch = L_rgb.index_select(0, idx) # (b,N,3)
+                            # 1) reduce noise (example: TV)
+                            # assumes you already have tv_loss(C,H,W) returning scalar
+                            reg = reg + w_tv_normal * tv_loss(P["normal"].permute(2, 0, 1))      # (3,H,W)
+                            reg = reg + w_tv_basecolor * tv_loss(P["baseColor"].permute(2, 0, 1))# (3,H,W)
 
-                        optimizer.zero_grad(set_to_none=True)
+                            # 2) future implementation
+                            # TODO: add priors (roughness, metallic sparsity, etc.)
 
-                        with torch.cuda.amp.autocast(enabled=use_amp):
+                            return reg
+
+
+                        def _forward_loss(variant_cls, tgt):
                             pred = model(
                                 V=V,
                                 L_dir=L_dir_batch,
                                 L_rgb=L_rgb_batch,
                                 irradiance_scale=float(irradiance_level),
+                                variant_cls=variant_cls,
                             )  # (b,3,H,W)
+                            pred = hdr_to_ldr_torch(pred)
+
+                            # data term
+                            has_mask = 'valid_mask_values' in data_dict
+                            loss_img = F.mse_loss(pred, tgt) if not has_mask else masked_mse(pred, tgt, mask)
+
+                            # regularizer on the *same constrained maps used by this variant*
+                            P_full = model._param_maps()
+                            P = P_full if variant_cls is None else variant_cls.constrain(P_full)
+                            loss_reg = regularizer(P)
+
+                            return loss_img + loss_reg
+                        
+                        print(f"[{dataset_name}][{obj_name}][{lighting_aug}][{brdf}][{polarization}] Starting optimization with {len(tgt_parallel_all)} target images per epoch, {n_epochs} epochs, batch size {batch_imgs}, learning rate {lr}, use_amp={use_amp}")
+                        for epoch in range(n_epochs+1):
+                            tik = time.time()
+                            epoch_loss = 0.0
                             
-                            if 'valid_mask_values' in data_dict:
-                                # regular mse
-                                loss_img = F.mse_loss(pred, tgt)
+                            perm = torch.randperm(len(tgt_parallel_all), device=device)
+                            M = len(tgt_parallel_all)
+                            
+                            for s in range(0, M, batch_imgs):
+                                idx = perm[s:s+batch_imgs]  # (b,)
 
-                                # regs 
-                                P = model._param_maps()
-                                loss_reg = 0.0
-                                loss_reg += w_tv_normal * tv_loss(P["normal"].permute(2, 0, 1))
-                                loss_reg += w_tv_basecolor * tv_loss(P["baseColor"].permute(2, 0, 1))
-                                loss_reg += w_prior_rough * (P["roughness"] - 0.5).abs().mean()
-                                loss_reg += 1e-3 * (1.0 / (P["roughness"] + 1e-3)).mean()
-                            else:
-                                loss_img = masked_mse(pred, tgt, mask)
+                                tgt_parallel = tgt_parallel_all.index_select(0, idx)           # (b,3,H,W)
+                                tgt_cross = tgt_cross_all.index_select(0, idx)                 # (b,3,H,W)
+                                L_dir_batch = L_dir.index_select(0, idx)     # (b,N,3)
+                                L_rgb_batch = L_rgb.index_select(0, idx) # (b,N,3)
 
-                                # P = model._param_maps()
+                                # start optimization step
+                                optimizer.zero_grad(set_to_none=True)
+                                do_parallel, do_cross, cross_variant_cls = _select_variant(polarization)
 
-                                # normal_chw    = P["normal"].permute(2,0,1)      # (3,H,W)
-                                # baseColor_chw = P["baseColor"].permute(2,0,1)   # (3,H,W)
-                                # roughness_hw  = P["roughness"]                  # (H,W)
+                                if do_parallel:
+                                    with torch.cuda.amp.autocast(enabled=use_amp):
+                                        loss_parallel = _forward_loss(None, tgt_parallel)
+                                    scaler.scale(loss_parallel).backward()
+                                else:
+                                    loss_parallel = torch.tensor(0.0, device=device)
 
-                                # loss_reg = 0.0
-                                # loss_reg += w_tv_normal    * masked_tv_loss(normal_chw, mask)
-                                # loss_reg += w_tv_basecolor * masked_tv_loss(baseColor_chw, mask)
-
-                                # # roughness prior (masked)
-                                # loss_reg += w_prior_rough * masked_mean((roughness_hw - 0.5).abs(), mask)
-                                # # optional: roughness barrier (masked) to prevent collapse
-                                # loss_reg += w_rough_bar * masked_mean(1.0 / (roughness_hw + 1e-3), mask)
+                                if do_cross:
+                                    with torch.cuda.amp.autocast(enabled=use_amp):
+                                        loss_cross = _forward_loss(cross_variant_cls, tgt_cross)
+                                    scaler.scale(loss_cross).backward()
+                                else:
+                                    loss_cross = torch.tensor(0.0, device=device)
 
 
-                            loss = loss_img + loss_reg
+                                # with torch.cuda.amp.autocast(enabled=use_amp):
+                                #     pred = model(
+                                #         V=V,
+                                #         L_dir=L_dir_batch,
+                                #         L_rgb=L_rgb_batch,
+                                #         irradiance_scale=float(irradiance_level),
+                                #     )  # (b,3,H,W)
+                                #     pred = hdr_to_ldr_torch(pred)
+                                    
+                                #     # if 'valid_mask_values' not in data_dict:
+                                #     #     # regular mse
+                                #     #     loss_img = F.mse_loss(pred, tgt_parallel)
+                                #     # else:
+                                #     #     loss_img = masked_mse(pred, tgt_parallel, mask)
+                                #     # regs 
+                                #     # P = model._param_maps() # TODO: this need to be constrained version
+                                #     # loss_reg = 0.0
+                                #     # loss_reg += w_tv_normal * tv_loss(P["normal"].permute(2, 0, 1))
+                                #     # loss_reg += w_tv_basecolor * tv_loss(P["baseColor"].permute(2, 0, 1))
+                                #     # loss_reg += w_prior_rough * (P["roughness"] - 0.5).abs().mean()
+                                #     # loss_reg += 1e-3 * (1.0 / (P["roughness"] + 1e-3)).mean()
 
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
+                                #     # loss = loss_img + loss_reg
+                                    
+                                        
+                                #     has_mask = 'valid_mask_values' in data_dict
+                                #     if polarization == 'parallel':
+                                #         loss_parallel = F.mse_loss(pred, tgt_parallel) if not has_mask else masked_mse(pred, tgt_parallel, mask)
+                                #         loss_cross = torch.tensor(0.0, device=device)
+                                #     elif polarization == 'cross':
+                                #         loss_parallel = torch.tensor(0.0, device=device)
+                                #         loss_cross = F.mse_loss(pred, tgt_cross) if not has_mask else masked_mse(pred, tgt_cross, mask)
+                                #     elif polarization == 'parallel-cross':
+                                #         assert False, "This should be fixed in dataloader"
+                                #     elif polarization.startswith('parallel+cross'):
+                                #         loss_parallel = F.mse_loss(pred, tgt_parallel) if not has_mask else masked_mse(pred, tgt_parallel, mask)
+                                        
+                                #         # introduce another model for cross polarization
+                                #         variant_cls = ''
+                                #         if '(diffuse)' in polarization:
+                                #             variant_cls = DisneyBRDFDiffuse
+                                #         elif '(diffuse-with-subsurface)' in polarization:
+                                #             variant_cls = DisneyBRDFDiffuseSubsurface
+                                #         else:
+                                #             assert False, f'Unknown polarization variant: {polarization}'
+                                        
+                                #         pred_cross = model(
+                                #             V=V,
+                                #             L_dir=L_dir_batch,
+                                #             L_rgb=L_rgb_batch,
+                                #             irradiance_scale=float(irradiance_level),
+                                #             variant_cls=variant_cls,
+                                #         )  # (b,3,H,W)
+                                #         pred_cross = hdr_to_ldr_torch(pred_cross)
+                                #         loss_cross = F.mse_loss(pred_cross, tgt_cross) if not has_mask else masked_mse(pred_cross, tgt_cross, mask)
+                                        
+                                #     else:
+                                #         assert False, f'Unknown polarization mode: {polarization}'
+                                        
+                                #     loss = loss_parallel + loss_cross
+                                    
 
-                        epoch_loss += float(loss.detach().item())
+                                # scaler.scale(loss).backward()
+                                scaler.step(optimizer)
+                                scaler.update()
 
-                    print(f"[{dataset_name}][{exp_name}][{obj_name}][{brdf}] epoch {epoch}/{n_epochs} loss={epoch_loss:.6f} time={time.time() - tik:.2f}s")
+                                loss = loss_parallel + loss_cross
+                                epoch_loss += float(loss.detach().item())
 
-                    torch.cuda.empty_cache()
+                            print(f"[{dataset_name}][{obj_name}][{lighting_aug}][{brdf}][{polarization}] epoch {epoch}/{n_epochs} loss={epoch_loss:.6f} time={time.time() - tik:.2f}s")
 
-                    # save fitted parameters
-                    save_dir = os.path.join(outdir, dataset_name, exp_name, obj_name, brdf)
-                    os.makedirs(save_dir, exist_ok=True)
-                    model.save_visuals(
-                        save_dir=str(save_dir),
-                        V=V,
-                        L_dir_all=L_dir,
-                        L_rgb_all=L_rgb,   # (M,N,3)
-                        tgt_all=tgt_all,   # (M,3,H,W)
-                        epoch=epoch,
-                        loss_value=epoch_loss,
-                        save_every=int(config.get("save_every", 5)),
-                        max_vis=int(config.get("max_vis", 8)),
-                        gamma=2.2,
-                        save_triplets=bool(config.get("save_triplets", True)),
-                        err_gain=float(config.get("err_gain", 4.0)),
-                    )
+                            torch.cuda.empty_cache()
+
+                            # save fitted parameters
+                            tgt_all = tgt_parallel_all if polarization != 'cross' else tgt_cross_all
+                            
+                            model.save_visuals(
+                                save_dir=str(out_setting_dir),
+                                V=V,
+                                L_dir_all=L_dir,
+                                L_rgb_all=L_rgb,   # (M,N,3)
+                                tgt_all=tgt_all,   # (M,3,H,W)
+                                epoch=epoch,
+                                loss_value=epoch_loss,
+                                save_every=save_every,
+                                max_vis=max_vis,
+                                # gamma=2.2,
+                                gamma=None,
+                                save_triplets=bool(config.get("save_triplets", True)),
+                                err_gain=float(config.get("err_gain", 4.0)),
+                            )
+
+                        # compare epochs
+                        model.compare_epochs(
+                            out_setting_dir, 
+                            out_dir=out_setting_dir,
+                            epochs=range(0, n_epochs+1, save_every), 
+                            render_indices=range(0, max_vis, 2), 
+                        )
+                        del model, optimizer
+
+                        torch.cuda.empty_cache()
 
                 torch.cuda.empty_cache()
-            
-            
+                        
+        # compare different settings
+        param_cfg = DisneyParamConfig(per_pixel=True)
+        model = DisneyBRDFPrinciple(H, W, device=device, cfg=param_cfg).to(device)
+        model.compare_settings(
+            settings, # ["runs/expA", "runs/expB", "runs/expC"],
+            labels=settings_label, # labels=["baseline", "no_sheen", "new_lr"],
+            out_dir=os.path.join(out_obj_dir, 'comparison'),
+            epoch="latest",
+            render_indices=range(0, max_vis, 2),
+            gt_index=0,
+        )
+        del model
+        torch.cuda.empty_cache()
+        
     
 def fit_disney_brdf_multi_gpu():
     rank, world_size, device = init_distributed()
@@ -1892,13 +2191,14 @@ def fit_disney_brdf_multi_gpu():
     config = {
         'outdir': 'output/optimization_dev',
         'lighting_augs': [
-            'fixed_olat1',
+            ('fixed_olat1', '1:1:0'),
             
-            # 'fixed_hdri_olat346_rot4',
-            # 'fixed_hdri_olat346_rot36', # 36s per light
-            # 'fixed_hdri_olat346_rot72', # 72s per light
+            ('fixed_hdri_olat346_rot4', '1:0:1'),
+            # ('fixed_hdri_olat346_rot36', '1:0:1'), # 36s per light
+            # ('fixed_hdri_olat346_rot72', '1:0:1'), # 72s per light
+            
+            ('fixed_olat1+hdri_olat346_rot4', '1:1:1'),
         ],
-        'lighting_aug_ratio': '1:1:0',
         'datasets': ['lightstage'],
         'irradiance_levels': {
             'lightstage': {
@@ -1908,51 +2208,60 @@ def fit_disney_brdf_multi_gpu():
                 'fixed_hdri_olat173': 1.0,
                 'fixed_hdri_olat346': 1.0,
                 'fixed_olat1': 1.0,
+                'fixed_olat1+hdri_olat346': 1.0,
             }
         },
+        'brdfs': [
+            # 'diffuse',
+            # 'diffuse-with-subsurface',
+            # 'specular',
+            # 'specular-with-clearcoat',
+            # 'simplified',
+            'simplified-multilayer',
+            # 'principle',
+        ],
+        
+        'polarizations': [
+            'cross',
+            'parallel',
+            'parallel+cross(diffuse)',
+            'parallel+cross(diffuse-with-subsurface)',
+        ],
         
         'first_n_item': {
-            
-            # all
-            # 'lightstage': -1,
-            
-            # each gpu run n after world_size
-            # 'lig  htstage': world_size * 2,
-            
-            # fixed number split across gpu
-            'lightstage': 1,
+            'lightstage': None, # goes to specific_item if set
+            # 'lightstage': -1, # all, take long time
+            # 'lightstage': world_size * 2,
+            # 'lightstage': 1,
         },
         # when specific_item and specific_cam are set, only the specified item and camera will be loaded for optimization
-        # 'specific_item': 'aluminiumbag',
         'specific_item': {
-            'lightstage': 'concrete1'
+            # 'lightstage': None,
+            'lightstage': ['concrete1', 'dragondruit', 'clorox', 'marbalball', 'metalbear', 'owlcase'],
         },
         'specific_cam': {
-            'lightstage': 5
+            'lightstage': 7
         }, 
         'first_n_hdri': {
-            'lightstage': 114, # hdri mode
+            'lightstage': 20, # hdri mode
         },
         'linsp_n_olat': {
             'lightstage': 86, # only in fixed_olat mode
         },
-        'overexposure_remove': True,
+        'overexposure_remove': False,
         
         # optimization settings
         'bch': 1,
-        'lr': 2e-2,
-        'epochs': 100,
+        'lr': 2e-3,
+        'epochs': 50,
         'w_tv_normal': 1e-3,
         'w_tv_basecolor': 1e-4,
         'w_prior_rough': 1e-4,
         'amp': False,
         'save_every': 10,
-        'max_vis': 8,
+        'max_vis': 40,
         'save_triplets': True,
         'err_gain': 4.0,
-        
-        # 'brdf': 'principle',
-        'brdf': 'diffuse', # 'principle', 'simplified', 'diffuse', 'specular'
     }
     
     # full 

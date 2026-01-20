@@ -7,11 +7,224 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 from pathlib import Path
 from typing import Dict, Optional, List
 
 from PIL import Image, ImageDraw, ImageFont
 
+
+def hdr_to_ldr(
+    hdr,
+    percentile=99.5,
+    gamma=1.0,
+    method="reinhard",          # "linear" | "reinhard" | "filmic" | "aces"
+    exposure=1.0,             # extra multiplier after percentile normalization
+    white=11.2,               # used by filmic (and optionally reinhard_white)
+    reinhard_white=True,     # if True, use Reinhard w/ white point
+    return_int8=False,
+    return_max_val=False,
+    eps=1e-8,
+):
+    """
+    HDR (linear) -> LDR (display-encoded).
+    - percentile normalization gives a stable scene-dependent scale (max_val).
+    - method selects tone mapping curve:
+        * linear   : clip(hdr/max_val)
+        * reinhard : x/(1+x)  (optionally white-point variant)
+        * filmic   : Hable/Uncharted2 curve normalized by 'white'
+        * aces     : ACES fitted (Narkowicz) curve
+    Note: Only 'linear' is meaningfully invertible with a stored max_val.
+    ldr_lin, s = ToneMap.hdr_to_ldr(hdr, method="linear",  percentile=99.5, gamma=2.2, return_max_val=True)
+    ldr_rei    = ToneMap.hdr_to_ldr(hdr, method="reinhard", percentile=99.5, gamma=2.2)
+    ldr_fil    = ToneMap.hdr_to_ldr(hdr, method="filmic",   percentile=99.5, gamma=2.2, white=11.2)
+    ldr_aces   = ToneMap.hdr_to_ldr(hdr, method="aces",     percentile=99.5, gamma=2.2)
+
+    """
+    hdr = np.asarray(hdr, dtype=np.float32)
+
+    # Robust percentile (ignore NaN/Inf)
+    finite = np.isfinite(hdr)
+    if np.any(finite):
+        max_val = float(np.percentile(hdr[finite], percentile))
+    else:
+        max_val = 1.0
+    max_val = max(max_val, eps)
+
+    # Scene-normalized linear values
+    x = (hdr / max_val) * float(exposure)
+    x = np.maximum(x, 0.0)  # optional: clamp negatives
+
+    method = method.lower()
+
+    if method == "linear":
+        y = np.clip(x, 0.0, 1.0)
+
+    elif method == "reinhard":
+        if reinhard_white:
+            w2 = float(white) * float(white) + eps
+            y = (x * (1.0 + x / w2)) / (1.0 + x + eps)
+        else:
+            y = x / (1.0 + x + eps)
+        y = np.clip(y, 0.0, 1.0)
+
+    elif method == "filmic":
+        # Hable / Uncharted 2 filmic curve
+        A, B, C, D, E, F = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+
+        def uncharted2_curve(t):
+            return ((t * (A * t + C * B) + D * E) / (t * (A * t + B) + D * F)) - E / F
+
+        y = uncharted2_curve(x)
+        w = uncharted2_curve(np.array(float(white), dtype=np.float32))
+        y = y / (w + eps)
+        y = np.clip(y, 0.0, 1.0)
+
+    elif method == "aces":
+        # ACES fitted (Narkowicz 2015)
+        a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+        y = (x * (a * x + b)) / (x * (c * x + d) + e)
+        y = np.clip(y, 0.0, 1.0)
+
+    else:
+        raise ValueError(f"Unknown method='{method}'. Use: linear|reinhard|filmic|aces")
+
+    # Display encoding (simple gamma; set gamma=1.0 to keep linear)
+    if gamma is not None and gamma != 1.0:
+        y = y ** (1.0 / float(gamma))
+
+    if return_int8:
+        y = (np.clip(y, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+    return (y, max_val) if return_max_val else y
+
+def hdr_to_ldr_torch(hdr,
+        percentile=99.5,
+        gamma=1.0,
+        method="reinhard",          # "linear" | "reinhard" | "filmic" | "aces"
+        exposure=1.0,
+        white=11.2,             # filmic white (and optional Reinhard white-point)
+        reinhard_white=True,
+        return_int8=False,
+        return_max_val=False,
+        eps=1e-8):
+    """
+    One function that works for BOTH NumPy arrays and Torch tensors.
+
+    HDR (linear) -> LDR (tone-mapped + gamma encoded).
+    - percentile: scene scale estimator (computed over all elements)
+    - method:
+        * linear   : clip(hdr/max_val)
+        * reinhard : x/(1+x) (or white-point variant)
+        * filmic   : Hable/Uncharted2 normalized by `white`
+        * aces     : ACES fitted (Narkowicz)
+    - gamma: simple gamma encoding; set gamma=1.0 to keep linear output
+    - return_max_val: also returns the computed max_val (scalar/tensor)
+
+    NOTE: Only 'linear' is meaningfully invertible using max_val. Others are not.
+    """
+    import numpy as np
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    is_torch = (torch is not None) and isinstance(hdr, torch.Tensor)
+
+    # ---- helpers ----
+    def clip01(x):
+        return x.clamp(0.0, 1.0) if is_torch else np.clip(x, 0.0, 1.0)
+
+    def isfinite(x):
+        return torch.isfinite(x) if is_torch else np.isfinite(x)
+
+    def percentile_val(x, q):
+        if is_torch:
+            f = torch.isfinite(x)
+            if not torch.any(f):
+                return x.new_tensor(1.0)
+            v = x[f].float()
+            return torch.quantile(v, float(q) / 100.0)
+        else:
+            f = np.isfinite(x)
+            if not np.any(f):
+                return 1.0
+            return float(np.percentile(x[f], q))
+
+    def gamma_encode(x):
+        if gamma is None or gamma == 1.0:
+            return x
+        return x ** (1.0 / float(gamma))
+
+    # ---- cast ----
+    x = hdr.float() if is_torch else np.asarray(hdr, dtype=np.float32)
+
+    # ---- compute scale ----
+    max_val = percentile_val(x, percentile)
+    if is_torch:
+        max_val = torch.clamp(max_val, min=float(eps))
+    else:
+        max_val = max(float(max_val), float(eps))
+
+    # ---- normalize + exposure ----
+    x = (x / max_val) * float(exposure)
+    x = torch.clamp(x, min=0.0) if is_torch else np.maximum(x, 0.0)
+
+    m = method.lower()
+
+    # ---- tone map ----
+    if m == "linear":
+        y = clip01(x)
+
+    elif m == "reinhard":
+        if reinhard_white:
+            if is_torch:
+                w = x.new_tensor(float(white))
+                w2 = w * w + float(eps)
+                y = (x * (1.0 + x / w2)) / (1.0 + x + float(eps))
+            else:
+                w2 = float(white) * float(white) + float(eps)
+                y = (x * (1.0 + x / w2)) / (1.0 + x + float(eps))
+        else:
+            y = x / (1.0 + x + float(eps))
+        y = clip01(y)
+
+    elif m == "filmic":
+        # Hable / Uncharted 2
+        A, B, C, D, E, F = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+
+        def uncharted2_curve(t):
+            return ((t * (A * t + C * B) + D * E) / (t * (A * t + B) + D * F)) - E / F
+
+        y = uncharted2_curve(x)
+        if is_torch:
+            w = uncharted2_curve(x.new_tensor(float(white)))
+            y = y / (w + float(eps))
+        else:
+            w = uncharted2_curve(np.array(float(white), dtype=np.float32))
+            y = y / (w + float(eps))
+        y = clip01(y)
+
+    elif m == "aces":
+        # ACES fitted (Narkowicz)
+        a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+        y = (x * (a * x + b)) / (x * (c * x + d) + e)
+        y = clip01(y)
+
+    else:
+        raise ValueError(f"Unknown method='{method}'. Use: linear|reinhard|filmic|aces")
+
+    # ---- gamma encode + optional uint8 ----
+    y = gamma_encode(y)
+
+    if return_int8:
+        if is_torch:
+            y = (clip01(y) * 255.0 + 0.5).to(torch.uint8)
+        else:
+            y = (np.clip(y, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+    return (y, max_val) if return_max_val else y
 
 
 def _safe_normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -93,7 +306,7 @@ class DisneyParamConfig:
     init_clearcoatGloss: float = 0.5
 
 
-class DisneyBRDF(nn.Module):
+class DisneyBRDFPrinciple(nn.Module):
     """
     Differentiable Disney BRDF (no transmission).
     Learnable parameters:
@@ -200,12 +413,13 @@ class DisneyBRDF(nn.Module):
         self,
         V: torch.Tensor,      # (H,W,3) view direction (surface -> camera)
         L: torch.Tensor,      # (N,3) light directions (surface -> light)
+        P: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         Returns:
           brdf: (N,H,W,3) RGB BRDF value (not multiplied by n·l).
         """
-        P = self._param_maps()
+        P = self._param_maps() if P is None else P
         n = P["normal"]                   # (H,W,3)
         baseColor = P["baseColor"]        # (H,W,3)
         metallic = P["metallic"]          # (H,W)
@@ -342,6 +556,7 @@ class DisneyBRDF(nn.Module):
         L_dir: torch.Tensor,        # (N,3)
         L_rgb: torch.Tensor,        # (N,3)
         irradiance_scale: float = 1.0,
+        variant_cls=None,
     ) -> torch.Tensor:
         """
         Simple direct lighting: sum_j ( brdf(v,l_j) * (n·l_j) * L_rgb_j )
@@ -350,10 +565,12 @@ class DisneyBRDF(nn.Module):
         V = _to_hwc3(V)
         L_rgb = L_rgb.to(V.device).to(V.dtype)  # (N,3)
 
-        brdf = self.evaluate_brdf(V, L_dir)  # (N,H,W,3)
+        P_full = self._param_maps()
+        P = P_full if variant_cls is None else variant_cls.constrain(P_full)
+        brdf = self.evaluate_brdf(V, L_dir, P=P)  # (N,H,W,3)
 
         # n·l
-        n = self._param_maps()["normal"]  # (H,W,3)
+        n = P["normal"]  # (H,W,3)
         L4 = _safe_normalize(L_dir.to(n.device).to(n.dtype)).view(-1, 1, 1, 3)
         nDotL = (n.unsqueeze(0) * L4).sum(dim=-1).clamp_min(0.0)  # (N,H,W)
 
@@ -370,6 +587,7 @@ class DisneyBRDF(nn.Module):
         L_dir: torch.Tensor,
         L_rgb: torch.Tensor,
         irradiance_scale: float = 1.0,
+        variant_cls=None,
     ) -> torch.Tensor:
         """
         Supports:
@@ -377,12 +595,12 @@ class DisneyBRDF(nn.Module):
           - L_rgb: (B,N,3) -> returns (B,3,H,W)
         """
         if L_rgb.dim() == 2:
-            return self.render(V, L_dir, L_rgb, irradiance_scale=irradiance_scale)
+            return self.render(V, L_dir, L_rgb, irradiance_scale=irradiance_scale, variant_cls=variant_cls)
         elif L_rgb.dim() == 3:
             outs = []
             assert L_rgb.shape[0] == L_dir.shape[0], f"Expected L_rgb shape (B,N,3) to match L_dir shape (B,N,3), got {L_rgb.shape} and {L_dir.shape}"
             for b in range(L_rgb.shape[0]):
-                outs.append(self.render(V, L_dir[b], L_rgb[b], irradiance_scale=irradiance_scale))
+                outs.append(self.render(V, L_dir[b], L_rgb[b], irradiance_scale=irradiance_scale, variant_cls=variant_cls))
             return torch.stack(outs, dim=0)  # (B,3,H,W)
         else:
             raise ValueError(f"Unexpected L_rgb shape: {L_rgb.shape}")
@@ -504,6 +722,7 @@ class DisneyBRDF(nn.Module):
 
         # ---- render preds batched
         pred = self(V=V, L_dir=L_dir_all.index_select(0, idx), L_rgb=L_rgb_all.index_select(0, idx))  # (vis,3,H,W)
+        pred = torch.stack([hdr_to_ldr_torch(p) for p in pred]) # TODO: may need to adjust hdr_to_ldr_torch for batched input
         tgt = tgt_all.index_select(0, idx)                                     # (vis,3,H,W)
         err = (pred - tgt).abs()
         err_vis = (err * float(err_gain)).clamp(0, 1)
@@ -564,38 +783,203 @@ class DisneyBRDF(nn.Module):
         # write into the *unconstrained* parameter
         self.baseColor_un.copy_(_logit(base_chw, eps=eps))
 
+    @staticmethod
+    def _img(p: Path, size=None, label=None, label_size=32):
+        """Load RGB image or return a labeled black tile."""
+        if p is not None and p.exists():
+            im = Image.open(str(p)).convert("RGB")
+            return im if (size is None or im.size == size) else im.resize(size, Image.BILINEAR)
+        # fallback tile
+        W, H = size if size is not None else (256, 256)
+        im = Image.new("RGB", (W, H), (0, 0, 0))
+        if label:
+            draw = ImageDraw.Draw(im)
+            try:
+                font = ImageFont.load_default(label_size)
+            except Exception:
+                font = None
+            draw.text((6, 6), label, fill=(255, 255, 255), font=font)
+        return im
 
+    @staticmethod
+    def _grid(rows_imgs, out_path: Path, pad=2):
+        """rows_imgs: List[List[PIL.Image]]"""
+        rows, cols = len(rows_imgs), max(len(r) for r in rows_imgs)
+        tw, th = rows_imgs[0][0].size
+        canvas = Image.new("RGB", (cols * tw + (cols - 1) * pad, rows * th + (rows - 1) * pad), (0, 0, 0))
+        for r in range(rows):
+            for c in range(cols):
+                canvas.paste(rows_imgs[r][c], (c * (tw + pad), r * (th + pad)))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(str(out_path))
+        return str(out_path)
 
-class DisneyBRDFSimplified(DisneyBRDF):
+    @staticmethod
+    def _epochs(save_dir: Path):
+        out = []
+        for sub in ["params", "renders"]:
+            p = save_dir / sub
+            if not p.exists():
+                continue
+            for d in p.iterdir():
+                if d.is_dir() and d.name.startswith("epoch_"):
+                    try:
+                        out.append(int(d.name.split("_")[-1]))
+                    except Exception:
+                        pass
+        return sorted(set(out))
+
+    @torch.no_grad()
+    def _compare(
+        self,
+        row_items,              # list of (row_label, save_dir, epoch_int)
+        out_dir,                # path
+        params,                 # list[str]
+        render_indices,         # list[int]
+        gt_index=0,
+        tile_size=None,
+    ):
+        out_dir = Path(out_dir)
+        # infer tile size from first available param
+        if tile_size is None:
+            for _, d, e in row_items:
+                for k in params:
+                    p = Path(d) / "params" / f"epoch_{e:04d}" / f"{k}.png"
+                    if p.exists():
+                        tile_size = Image.open(str(p)).convert("RGB").size
+                        break
+                if tile_size is not None:
+                    break
+            tile_size = tile_size or (256, 256)
+
+        # ---- params.png
+        header = [self._img(None, tile_size, "row\\param")] + [self._img(None, tile_size, k) for k in params]
+        rows = [header]
+        for lab, d, e in row_items:
+            r = [self._img(None, tile_size, f"{lab}\n{e:04d}")]
+            for k in params:
+                p = Path(d) / "params" / f"epoch_{e:04d}" / f"{k}.png"
+                r.append(self._img(p, tile_size, f"missing\n{k}"))
+            rows.append(r)
+        params_png = self._grid(rows, out_dir / "params.png")
+
+        # ---- renders.png (GT last col; use GT from first row if exists)
+        header = [self._img(None, tile_size, "row\\render")] + \
+                 [self._img(None, tile_size, f"pred {j:02d}") for j in render_indices]
+        rows = [header]
+
+        # add GT row (use first available GT among settings)
+        gt_tile = None
+        for _, d, e in row_items:
+            gp = Path(d) / "renders" / f"epoch_{e:04d}" / f"{gt_index:02d}_tgt.png"
+            if gp.exists():
+                gt_tile = self._img(gp, tile_size)
+                break
+        gt_tile = gt_tile or self._img(None, tile_size, "missing\nGT")
+
+        gt_row = [self._img(None, tile_size, f"GT\n{gt_index:02d}")]
+        gt_row += [gt_tile for _ in render_indices]   # repeat so grid stays rectangular
+        # rows.append(gt_row)
+
+        # then one row per setting
+        for lab, d, e in row_items:
+            r = [self._img(None, tile_size, f"{lab}\n{e:04d}")]
+            for j in render_indices:
+                p = Path(d) / "renders" / f"epoch_{e:04d}" / f"{j:02d}_pred.png"
+                r.append(self._img(p, tile_size, f"missing\npred {j:02d}"))
+            rows.append(r)
+
+        renders_png = self._grid(rows, out_dir / "renders.png")
+
+        return {"params": params_png, "renders": renders_png}
+
+    # -------- public APIs --------
+
+    @torch.no_grad()
+    def compare_epochs(
+        self,
+        save_dir,
+        epochs=None,
+        out_dir=None,
+        params=None,
+        render_indices=None,
+        gt_index=0,
+        tile_size=None,
+    ):
+        save_dir = Path(save_dir)
+        epochs = list(epochs) if epochs is not None else self._epochs(save_dir)
+        assert len(epochs) > 0, f"No epochs found under {save_dir}"
+        out_dir = Path(out_dir) if out_dir is not None else (save_dir / "compare_epochs")
+        params = list(params) if params is not None else [
+            "normal", "baseColor",
+            "metallic", "roughness", "specular", "specularTint",
+            "subsurface", "anisotropic", "sheen", "sheenTint",
+            "clearcoat", "clearcoatGloss",
+        ]
+        render_indices = list(render_indices) if render_indices is not None else [0, 1, 2, 3]
+        row_items = [(f"epoch", save_dir, e) for e in epochs]
+        return self._compare(row_items, out_dir, params, render_indices, gt_index=gt_index, tile_size=tile_size)
+
+    @torch.no_grad()
+    def compare_settings(
+        self,
+        save_dirs,
+        labels=None,
+        epoch="latest",
+        out_dir=None,
+        params=None,
+        render_indices=None,
+        gt_index=0,
+        tile_size=None,
+    ):
+        save_dirs = [Path(d) for d in save_dirs]
+        labels = list(labels) if labels is not None else [d.name for d in save_dirs]
+        assert len(labels) == len(save_dirs)
+
+        # pick epoch per setting
+        row_items = []
+        for lab, d in zip(labels, save_dirs):
+            if isinstance(epoch, int):
+                e = epoch
+            else:
+                es = self._epochs(d)
+                e = es[-1] if len(es) else None
+            if e is None:
+                continue
+            row_items.append((lab, d, e))
+        assert len(row_items) > 0, "No valid epochs found in provided save_dirs"
+
+        out_dir = Path(out_dir) if out_dir is not None else (save_dirs[0] / "compare_settings")
+        params = list(params) if params is not None else [
+            "normal", "baseColor",
+            "metallic", "roughness", "specular", "specularTint",
+            "subsurface", "anisotropic", "sheen", "sheenTint",
+            "clearcoat", "clearcoatGloss",
+        ]
+        render_indices = list(render_indices) if render_indices is not None else [0, 1, 2, 3]
+        return self._compare(row_items, out_dir, params, render_indices, gt_index=gt_index, tile_size=tile_size)
+
+class DisneyBRDFConstrained(DisneyBRDFPrinciple):
     """
-    Simplified variant:
-      subsurface = 0, anisotropic = 0, sheen = 0, clearcoat = 0
-    So we only fit: normal, baseColor, metallic, specular, roughness, specularTint, sheenTint(irrelevant but kept)
+    Variant base class: subclasses override `constrain(P)` only.
+    `_param_maps()` is shared and applies the constraint on top of DisneyBRDF's maps.
     """
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        return P  # identity by default
+
     def _param_maps(self) -> dict:
-        P = super()._param_maps()
+        # IMPORTANT: constrain should return a new dict (or we copy here)
+        return self.constrain(dict(super()._param_maps()))
+
+
+class DisneyBRDFDiffuse(DisneyBRDFConstrained):
+    # surface diffuse only
+    @staticmethod
+    def constrain(P: dict) -> dict:
         zero3 = torch.zeros_like(P["baseColor"])
         zero1 = zero3[..., 0]
         
-        # P["normal"] = zero3
-        # P["baseColor"] = zero3
-        # P["metallic"] = zero1
-        P["subsurface"] = zero1
-        # P["specular"] = zero1
-        # P["roughness"] = zero1
-        # P["specularTint"] = zero1
-        P["anisotropic"] = zero1
-        P["sheen"] = zero1
-        P["sheenTint"] = zero1
-        P["clearcoat"] = zero1
-        P["clearcoatGloss"] = zero1
-        return P
-
-class DisneyBRDFDiffuse(DisneyBRDF):
-    def _param_maps(self) -> dict:
-        P = super()._param_maps()
-        zero3 = torch.zeros_like(P["baseColor"])
-        zero1 = zero3[..., 0]
         # P["normal"] = zero3
         # P["baseColor"] = zero3
         P["metallic"] = zero1
@@ -609,10 +993,32 @@ class DisneyBRDFDiffuse(DisneyBRDF):
         P["clearcoat"] = zero1
         P["clearcoatGloss"] = zero1
         return P
+    
+    
+class DisneyBRDFDiffuseSubsurface(DisneyBRDFConstrained):
+    # surface diffuse + subsurface
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        zero3 = torch.zeros_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+        # P["normal"] = zero3
+        # P["baseColor"] = zero3
+        P["metallic"] = zero1
+        # P["subsurface"] = zero1
+        P["specular"] = zero1
+        # P["roughness"] = zero1
+        P["specularTint"] = zero1
+        P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        P["clearcoat"] = zero1
+        P["clearcoatGloss"] = zero1
+        return P
 
-class DisneyBRDFSpecular(DisneyBRDF):
-    def _param_maps(self) -> dict:
-        P = super()._param_maps()
+class DisneyBRDFSpecular(DisneyBRDFConstrained):
+    # surface specular only
+    @staticmethod
+    def constrain(P: dict) -> dict:
         one3 = torch.ones_like(P["baseColor"])
         one1 = one3[..., 0]
         zero3 = torch.zeros_like(P["baseColor"])
@@ -626,8 +1032,74 @@ class DisneyBRDFSpecular(DisneyBRDF):
         # P["roughness"] = zero1
         # P["specularTint"] = zero1
         # P["anisotropic"] = zero1
-        # P["sheen"] = zero1
-        # P["sheenTint"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        P["clearcoat"] = zero1
+        P["clearcoatGloss"] = zero1
+        return P
+
+class DisneyBRDFSpecularClearcoat(DisneyBRDFConstrained):
+    # surface specular + clearcoat
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        one3 = torch.ones_like(P["baseColor"])
+        one1 = one3[..., 0]
+        zero3 = torch.zeros_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+
+        # P["normal"] = zero3
+        # P["baseColor"] = zero3
+        P["metallic"] = one1
+        P["subsurface"] = zero1
+        # P["specular"] = zero1
+        # P["roughness"] = zero1
+        # P["specularTint"] = zero1
+        # P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        # P["clearcoat"] = zero1
+        # P["clearcoatGloss"] = zero1
+        return P
+
+
+class DisneyBRDFSimplified(DisneyBRDFConstrained):
+    # surface diffuse + specular, no layers
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        zero3 = torch.zeros_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+        
+        # P["normal"] = zero3
+        # P["baseColor"] = zero3
+        # P["metallic"] = zero1
+        P["subsurface"] = zero1
+        # P["specular"] = zero1
+        # P["roughness"] = zero1
+        # P["specularTint"] = zero1
+        # P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        P["clearcoat"] = zero1
+        P["clearcoatGloss"] = zero1
+        return P
+    
+class DisneyBRDFSimplifiedMultiLayer(DisneyBRDFConstrained):
+    # surface diffuse + subsurface + surface specular + clearcoat
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        zero3 = torch.zeros_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+        
+        # P["normal"] = zero3
+        # P["baseColor"] = zero3
+        # P["metallic"] = zero1
+        # P["subsurface"] = zero1
+        # P["specular"] = zero1
+        # P["roughness"] = zero1
+        # P["specularTint"] = zero1
+        # P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
         # P["clearcoat"] = zero1
         # P["clearcoatGloss"] = zero1
         return P

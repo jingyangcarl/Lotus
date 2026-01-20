@@ -141,7 +141,7 @@
             "program": "${workspaceFolder}/train_lotus_g_rgb2x.py",
             "console": "integratedTerminal",
             "env": {
-                "CUDA_VISIBLE_DEVICES": "4",
+                "CUDA_VISIBLE_DEVICES": "2",
             },
             "args": [
                 // "--pretrained_model_name_or_path=stabilityai/stable-diffusion-2-base",
@@ -161,7 +161,9 @@
                 // "--lightstage_original_augmentation_ratio=1:1:0",
                 // "--lightstage_lighting_augmentation=random_hdri_olat21",
                 // "--lightstage_original_augmentation_ratio=1:0:1",
-                "--lightstage_lighting_augmentation=random_olat8+hdri_olat21",
+                // "--lightstage_lighting_augmentation=random_olat8+hdri_olat21",
+                // "--lightstage_original_augmentation_ratio=1:1:1",
+                "--lightstage_lighting_augmentation=random_hdri_olat346",
                 "--lightstage_original_augmentation_ratio=1:1:1",
                 "--lightstage_lighting_augmentation_pair_n=2",
                 "--lightstage_augmentation_pair_loss_enable",

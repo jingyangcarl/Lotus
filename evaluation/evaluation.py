@@ -429,7 +429,7 @@ def evaluation_material(
                 continue
             
             from utils.lightstage_dataset import LightstageDataset, collate_fn_lightstage
-            test_dataset_lightstage = LightstageDataset(split=split, tasks=curr_task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n=args.evaluation_top_k)
+            test_dataset_lightstage = LightstageDataset(split=split, tasks=curr_task, ori_aug_ratio=args.lightstage_original_augmentation_ratio, lighting_aug=args.lightstage_lighting_augmentation, eval_first_n_item=args.evaluation_top_k)
         # print(f'Number of samples in {dataset_name} {split}: {len(samples)}')
         bsz = 1
         test_loader = DataLoader(

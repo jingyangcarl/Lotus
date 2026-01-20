@@ -4,8 +4,7 @@ eval "$(conda shell.bash hook)"
 conda activate base
 cd /home/jyang/projects/ObjectReal/external/lotus
 
-# export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6
 # https://github.com/naver/mast3r/issues/6
 
 export TORCH_NCCL_ENABLE_MONITORING=0
@@ -16,5 +15,4 @@ export PYTHONPATH=$(pwd)
 
 conda activate lotus
 # python eval_lightstage.py
-# torchrun --nproc_per_node=8 --master_port=29605 eval_lightstage.py
-torchrun --nproc_per_node=1 --master_port=29605 eval_lightstage.py
+torchrun --nproc_per_node=1 --master_port=29606 eval_lightstage.py
