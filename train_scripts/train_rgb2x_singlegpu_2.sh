@@ -44,7 +44,7 @@ export TASK_NAME="inverse"
 # export AUG_RATIO="1:1:1"
 # export AUG_TYPE="random_olat8+hdri_olat21"
 export AUG_RATIO="0:0:1"
-export AUG_TYPE="random_hdri_olat86"
+export AUG_TYPE="random_hdri_olat346"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -57,7 +57,7 @@ export EVAL_TOP_K=10
 export EVALUATION_OLAT_STEPS=400000 # disable olat eval
 
 # output dir
-export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-olat86"
+export OUTPUT_DIR="output/benchmark/train-rgb2x-lora-${TASK_NAME}-bsz${TOTAL_BSZ}-olat346-nocache"
 
 # add --config_file=accelerate_configs/cuda_d.yaml after launch to enable multi-gpu training
 accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision="fp16" \
@@ -101,5 +101,6 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml --mixed_precision
   --output_dir=$OUTPUT_DIR \
   --checkpoints_total_limit=3 \
   --resume_from_checkpoint="latest" \
+  --evaluation_skip_step0 \
   --use_lora \
   --save_pred_vis
