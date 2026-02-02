@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+from scipy.special import sph_harm
 
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -358,6 +359,19 @@ class DisneyBRDFPrinciple(nn.Module):
         self.sheenTint_un = make_scalar(cfg.init_sheenTint)
         self.clearcoat_un = make_scalar(cfg.init_clearcoat)
         self.clearcoatGloss_un = make_scalar(cfg.init_clearcoatGloss)
+        
+        # ============================================================
+        # SH lighting support (buffers initialized later via init_sh_buffers)
+        # ============================================================
+        self.sh_Lmax = getattr(cfg, "sh_Lmax", 3)
+        self.sh_K = (self.sh_Lmax + 1) ** 2
+
+        # register as buffers so they move with .to(device) and are saved if persistent=True
+        # we start with empty tensors and fill them later
+        self.register_buffer("sh_dirs", torch.empty(0, 3, device=device, dtype=torch.float32), persistent=False)  # (N,3)
+        self.register_buffer("sh_w",   torch.empty(0,    device=device, dtype=torch.float32), persistent=False)  # (N,)
+        self.register_buffer("sh_Y",   torch.empty(0, self.sh_K, device=device, dtype=torch.float32), persistent=False)  # (N,K)
+
 
     def _expand(self, x_chw: torch.Tensor) -> torch.Tensor:
         # x_chw: (C, H, W) if per_pixel else (C,1,1) -> expand to (C,H,W)
@@ -408,6 +422,104 @@ class DisneyBRDFPrinciple(nn.Module):
         # total number of parameters
         total_params = sum(p.numel() for p in self.parameters())
         print(f"Total parameters: {total_params}")
+        
+    # ============================
+    # SH init helpers (SciPy)
+    # ============================
+    @staticmethod
+    def _sh_index(l: int, m: int) -> int:
+        # pack (l,m) with m in [-l,l] into [0, (Lmax+1)^2)
+        return l * l + l + m
+
+    @staticmethod
+    def _fibonacci_sphere_dirs(N: int, dtype=np.float64):
+        """
+        Deterministic near-uniform points on unit sphere.
+        Returns:
+          dirs: (N,3)
+          w:    (N,) weights summing to 4π
+        """
+        i = np.arange(N, dtype=dtype)
+        ga = np.pi * (3.0 - np.sqrt(5.0))  # golden angle
+        z = 1.0 - 2.0 * (i + 0.5) / N
+        r = np.sqrt(np.maximum(0.0, 1.0 - z * z))
+        phi = ga * i
+        x = r * np.cos(phi)
+        y = r * np.sin(phi)
+        dirs = np.stack([x, y, z], axis=1)
+        w = np.full((N,), 4.0 * np.pi / N, dtype=dtype)
+        return dirs, w
+
+    @classmethod
+    def _real_sh_basis_scipy(cls, dirs: np.ndarray, Lmax: int, dtype=np.float64) -> np.ndarray:
+        """
+        Real SH basis from SciPy complex sph_harm.
+
+        SciPy sph_harm(m, l, phi, theta):
+          theta = arccos(z) in [0,π]
+          phi   = atan2(y,x) in [0,2π)
+
+        Real SH convention here:
+          Y(l,0)    = Re(Yc(l,0))
+          Y(l,m>0)  = sqrt(2) * (-1)^m * Re(Yc(l,m))
+          Y(l,m<0)  = sqrt(2) * (-1)^m * Im(Yc(l,|m|))
+
+        Packed index k = l*l + l + m
+        """
+        assert dirs.shape[1] == 3
+        x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+
+        theta = np.arccos(np.clip(z, -1.0, 1.0))
+        phi = np.mod(np.arctan2(y, x), 2.0 * np.pi)
+
+        N = dirs.shape[0]
+        K = (Lmax + 1) ** 2
+        Y = np.empty((N, K), dtype=dtype)
+        sqrt2 = np.sqrt(2.0).astype(dtype)
+
+        for l in range(Lmax + 1):
+            # m = 0
+            Yc0 = sph_harm(0, l, phi, theta)  # complex
+            Y[:, cls._sh_index(l, 0)] = Yc0.real.astype(dtype)
+
+            for m in range(1, l + 1):
+                Yc = sph_harm(m, l, phi, theta)  # complex
+                Y[:, cls._sh_index(l, m)] = (sqrt2 * ((-1.0) ** m) * Yc.real).astype(dtype)
+                Y[:, cls._sh_index(l, -m)] = (sqrt2 * ((-1.0) ** (-m)) * Yc.imag).astype(dtype)
+
+        return Y
+
+    def init_sh_buffers(
+        self,
+        Lmax: int = None,
+        N_dirs: int = 2048,
+        torch_dtype: torch.dtype = torch.float32,
+    ):
+        """
+        Build and store SH buffers on this module (SciPy on CPU -> move to module device).
+
+        Creates:
+          self.sh_dirs: (N,3)
+          self.sh_w:    (N,) weights sum to 4π
+          self.sh_Y:    (N,K) real SH basis, K=(Lmax+1)^2
+        """
+        if Lmax is None:
+            Lmax = int(self.sh_Lmax)
+        else:
+            self.sh_Lmax = int(Lmax)
+
+        self.sh_K = (self.sh_Lmax + 1) ** 2
+
+        # CPU build (float64 for accuracy)
+        dirs_np, w_np = self._fibonacci_sphere_dirs(int(N_dirs), dtype=np.float64)
+        Y_np = self._real_sh_basis_scipy(dirs_np, Lmax=self.sh_Lmax, dtype=np.float64)  # (N,K)
+
+        dev = next(self.parameters()).device
+
+        self.sh_dirs = torch.from_numpy(dirs_np).to(device=dev, dtype=torch_dtype)
+        self.sh_w    = torch.from_numpy(w_np).to(device=dev, dtype=torch_dtype)
+        self.sh_Y    = torch.from_numpy(Y_np).to(device=dev, dtype=torch_dtype)
+
 
     def evaluate_brdf(
         self,
@@ -579,7 +691,82 @@ class DisneyBRDFPrinciple(nn.Module):
         weight = (4.0 * math.pi) / max(L_dir.shape[0], 1)   # scalar
         out = (brdf * nDotL.unsqueeze(-1) * Li).sum(dim=0) * weight  # (H,W,3)
         out = out * float(irradiance_scale)
-        return out.permute(2, 0, 1).contiguous()  # (3,H,W)
+        out = hdr_to_ldr_torch(
+            out.permute(2, 0, 1).contiguous(),
+            percentile=99.5,
+            # percentile=100.0,
+        )
+        return out  # (3,H,W)
+        
+    def render_sh(
+        self,
+        V: torch.Tensor,              # (H,W,3) or (3,H,W)
+        sh_coeffs_rgb: torch.Tensor,  # (K,3) or (1,K,3)
+        irradiance_scale: float = 1.0,
+        variant_cls=None,
+        clamp_light_nonneg: bool = True,
+        dir_batch: int = 256,
+    ) -> torch.Tensor:
+        """
+        SH lighting render for exactly ONE HDRI.
+        Returns: (3,H,W)
+        """
+        assert self.sh_dirs.numel() > 0 and self.sh_w.numel() > 0 and self.sh_Y.numel() > 0, \
+            "SH buffers not initialized. Call model.init_sh_buffers(...) first."
+        assert self.sh_Y.shape[1] == self.sh_K, f"SH K mismatch: sh_Y has {self.sh_Y.shape[1]} but sh_K={self.sh_K}"
+
+        V = _to_hwc3(V)
+
+        P_full = self._param_maps()
+        P = P_full if variant_cls is None else variant_cls.constrain(P_full)
+        n = P["normal"]  # (H,W,3)
+
+        # --- enforce single HDRI ---
+        if sh_coeffs_rgb.dim() == 2:
+            # (K,3) -> (1,K,3)
+            sh_coeffs_rgb = sh_coeffs_rgb.unsqueeze(0)
+        else:
+            # must be (1,K,3)
+            assert sh_coeffs_rgb.dim() == 3 and sh_coeffs_rgb.shape[0] == 1, \
+                f"Expected sh_coeffs_rgb to be (K,3) or (1,K,3), got {tuple(sh_coeffs_rgb.shape)}"
+
+        _, K, C = sh_coeffs_rgb.shape
+        assert K == self.sh_K and C == 3, f"Expected (1,{self.sh_K},3), got {tuple(sh_coeffs_rgb.shape)}"
+
+        # Reconstruct sampled env colors: L(N,3) = Y(N,K) @ c(1,K,3)
+        # -> (1,N,3) then squeeze -> (N,3)
+        L_rgb = torch.einsum("nk,bkc->bnc", self.sh_Y, sh_coeffs_rgb.to(self.sh_Y.dtype).to(self.sh_Y.device)).squeeze(0)
+        if clamp_light_nonneg:
+            L_rgb = L_rgb.clamp_min(0.0)
+
+        dirs = self.sh_dirs  # (N,3)
+        w = self.sh_w        # (N,)
+
+        out_hw3 = torch.zeros((self.H, self.W, 3), device=dirs.device, dtype=V.dtype)
+
+        for s in range(0, dirs.shape[0], dir_batch):
+            d = dirs[s:s+dir_batch]      # (m,3)
+            Li = L_rgb[s:s+dir_batch]    # (m,3)
+            ww = w[s:s+dir_batch]        # (m,)
+
+            brdf = self.evaluate_brdf(V, d, P=P)  # (m,H,W,3)
+
+            d4 = _safe_normalize(d.to(n.device).to(n.dtype)).view(-1, 1, 1, 3)
+            nDotL = (n.unsqueeze(0) * d4).sum(dim=-1).clamp_min(0.0)  # (m,H,W)
+
+            Li4 = Li.to(brdf.dtype).to(brdf.device).view(-1, 1, 1, 3)
+            ww4 = ww.to(brdf.dtype).to(brdf.device).view(-1, 1, 1, 1)
+
+            out_hw3 = out_hw3 + (brdf * nDotL.unsqueeze(-1) * Li4 * ww4).sum(dim=0)
+
+        out_hw3 = out_hw3 * float(irradiance_scale)
+
+        out = hdr_to_ldr_torch(
+            out_hw3.permute(2, 0, 1).contiguous(),
+            percentile=99.5,
+        )  # (3,H,W)
+        return out
+
 
     def forward(
         self,
@@ -588,12 +775,29 @@ class DisneyBRDFPrinciple(nn.Module):
         L_rgb: torch.Tensor,
         irradiance_scale: float = 1.0,
         variant_cls=None,
+        sh_coeffs_rgb: Optional[torch.Tensor] = None,  # (K,3) or (B,K,3)
     ) -> torch.Tensor:
         """
         Supports:
           - L_rgb: (N,3) -> returns (3,H,W)
           - L_rgb: (B,N,3) -> returns (B,3,H,W)
         """
+        """
+        Lighting modes:
+          - Directional (existing): provide (L_dir, L_rgb)
+          - SH lighting: provide sh_coeffs_rgb, calls render_sh()
+        """
+        if sh_coeffs_rgb is not None:
+            return self.render_sh(
+                V,
+                sh_coeffs_rgb,
+                irradiance_scale=irradiance_scale,
+                variant_cls=variant_cls,
+            )
+
+        assert L_dir is not None and L_rgb is not None, \
+            "Provide (L_dir, L_rgb) for directional lighting, or sh_coeffs_rgb for SH lighting."
+
         if L_rgb.dim() == 2:
             return self.render(V, L_dir, L_rgb, irradiance_scale=irradiance_scale, variant_cls=variant_cls)
         elif L_rgb.dim() == 3:
@@ -722,7 +926,6 @@ class DisneyBRDFPrinciple(nn.Module):
 
         # ---- render preds batched
         pred = self(V=V, L_dir=L_dir_all.index_select(0, idx), L_rgb=L_rgb_all.index_select(0, idx))  # (vis,3,H,W)
-        pred = torch.stack([hdr_to_ldr_torch(p) for p in pred]) # TODO: may need to adjust hdr_to_ldr_torch for batched input
         tgt = tgt_all.index_select(0, idx)                                     # (vis,3,H,W)
         err = (pred - tgt).abs()
         err_vis = (err * float(err_gain)).clamp(0, 1)
