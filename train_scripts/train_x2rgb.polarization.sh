@@ -46,9 +46,9 @@ export TIMESTEP=999
 export TASK_NAME="forward_polarization"
 
 # data augmentation
-export AUG_RATIO="2:1"
+export AUG_RATIO="1:1:1"
 # export AUG_TYPE="random1"
-export AUG_TYPE="random1+hdri_olat20"
+export AUG_TYPE="random_olat1+hdri_olat346"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
@@ -58,7 +58,6 @@ export VAL_STEP=1000
 export VAL_TOP_K=10
 export EVAL_STEP=10000 # need to be integer multiple of VAL_STEP
 export EVAL_TOP_K=50
-export FORWARD_RENDERING_WARMUP_STEPS=400000
 export EVALUATION_OLAT_STEPS=20000
 
 # output dir
@@ -107,5 +106,4 @@ accelerate launch --config_file=accelerate_configs/cuda_g.yaml  --mixed_precisio
   --checkpoints_total_limit=1 \
   --resume_from_checkpoint="latest" \
   --use_lora \
-  --forward_rendering_warmup_steps=$FORWARD_RENDERING_WARMUP_STEPS \
   --save_pred_vis

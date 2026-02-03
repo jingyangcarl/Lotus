@@ -14,5 +14,4 @@ export OMP_NUM_THREADS=16
 export PYTHONPATH=$(pwd)
 
 conda activate lotus
-# python eval_lightstage.py
-torchrun --nproc_per_node=6 --master_port=29605 eval_lightstage.py
+torchrun --nproc_per_node=6 --master_port=29605 fit_brdf.py

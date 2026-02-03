@@ -241,6 +241,8 @@ class LightstageDataset(Dataset):
         else:
             self.olat_hdri_346_in_sh = []
             
+        self.omega_i_sh = np.ones((self.omega_i_world.shape[0], (self.sh_level+1)**2), dtype=np.float32)
+            
         if self.lighting_augmentation.startswith('fixed_hdri') or 'olat346' in self.lighting_augmentation:
             self.olat_hdri_346 = np.stack([self.get_olat_hdri(j) for j in range(346)], axis=0)
         else:
@@ -1745,6 +1747,7 @@ class LightstageDataset(Dataset):
                         torch.save({'olat_processed': olat_processed.to(torch.bfloat16), 'olat_diff': olat_diff.to(torch.bfloat16)}, cache_path) # 1.2G for float32, 572M for float16
 
             return olat_processed.to('cuda')
+            # return olat_processed
             
         # the following lighting synthesis will all be the same object, therefore only to load the olat once
         # when single olat, mask out unused lights

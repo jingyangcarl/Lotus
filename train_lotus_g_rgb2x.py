@@ -1072,7 +1072,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
                 else:
                     raise ValueError(f"Not Supported Forward Rendering Task: {task}!")
                 for inv_task in inverse_tasks:
-                    if args.pretrained_inverse_model_path is not None:
+                    if args.pretrained_inverse_model_path is not None and os.path.exists(args.pretrained_inverse_model_path):
                         ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
                         ckpts.sort(key=lambda x: int(x.split('checkpoint-')[-1]), reverse=True)
                         if len(ckpts) > 0:
@@ -1118,7 +1118,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         tasks = [task]
         for task in tasks:
             if args.use_lora:
-                if args.pretrained_inverse_model_path is not None:
+                if args.pretrained_inverse_model_path is not None and os.path.exists(args.pretrained_inverse_model_path):
                     # wrap_pipeline_rgb2x('output/relighting/fixalbedo_fixradiance/train-rgb2x-lora-albedo-bsz32_FR_warmup40000_check_albedo', None, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
                     # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_lora_enable', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
                     ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
@@ -1130,7 +1130,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
                 wrap_pipeline_x2rgb(args.pretrained_model_name_or_path, unet, task, model_alias='x2rgb_finetune_lora_enable', inverse_model_alias='gt', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
             else:
                 # wrap_pipeline_rgb2x('output/relighting/train-rgb2x-lora-albedo-bsz32-noFR', unet, model_alias='rgb2x_finetune_no_lora', reload_pretrained_unet=False, disable_lora_on_reference=False, enable_eval=enable_eval)
-                if args.pretrained_inverse_model_path is not None:
+                if args.pretrained_inverse_model_path is not None and os.path.exists(args.pretrained_inverse_model_path):
                     ckpts = [dirname for dirname in os.listdir(args.pretrained_inverse_model_path) if 'checkpoint-' in dirname]
                     ckpts.sort(key=lambda x: int(x.split('checkpoint-')[-1]), reverse=True)
                     if len(ckpts) > 0:
@@ -2059,8 +2059,10 @@ def main():
             lighting_aug_pair_n=args.lightstage_lighting_augmentation_pair_n,
             use_cache=args.lightstage_use_cache
         )
+        ctx = torch.multiprocessing.get_context("spawn")
         train_dataloader_lightstage = torch.utils.data.DataLoader(
             train_dataset_lightstage,
+            multiprocessing_context=ctx,
             shuffle=True,
             collate_fn=collate_fn_lightstage,
             batch_size=args.train_batch_size,

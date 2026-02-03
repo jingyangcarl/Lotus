@@ -18,7 +18,7 @@
                 // "--nproc_per_node=5",
                 "--nproc_per_node=1",
                 "--master_port=12342",
-                "eval_lightstage.py",
+                "fit_brdf.py",
             ],
         },
         {
@@ -167,7 +167,6 @@
                 "--lightstage_original_augmentation_ratio=1:1:1",
                 "--lightstage_lighting_augmentation_pair_n=2",
                 "--lightstage_augmentation_pair_loss_enable",
-                "--lightstage_img_ext=jpg",
                 "--mix_dataset",
                 "--random_flip",
                 "--norm_type=trunc_disparity",
@@ -201,7 +200,6 @@
                 "--checkpoints_total_limit=1",
                 "--resume_from_checkpoint=latest",
                 "--use_lora",
-                // "--forward_rendering_warmup_steps=10000000000",
                 "--save_pred_vis"
             ],
             "justMyCode": false
