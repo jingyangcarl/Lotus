@@ -668,6 +668,7 @@ class DisneyBRDFPrinciple(nn.Module):
         L_dir: torch.Tensor,        # (N,3)
         L_rgb: torch.Tensor,        # (N,3)
         irradiance_scale: float = 1.0,
+        mask: Optional[torch.Tensor] = None,  # (1,H,W)
         variant_cls=None,
     ) -> torch.Tensor:
         """
@@ -691,6 +692,11 @@ class DisneyBRDFPrinciple(nn.Module):
         weight = (4.0 * math.pi) / max(L_dir.shape[0], 1)   # scalar
         out = (brdf * nDotL.unsqueeze(-1) * Li).sum(dim=0) * weight  # (H,W,3)
         out = out * float(irradiance_scale)
+        
+        if mask is not None:
+            mask = mask.to(out.device).to(out.dtype)
+            out = out * mask.permute(1, 2, 0).contiguous()  # (H,W,3)
+        
         out = hdr_to_ldr_torch(
             out.permute(2, 0, 1).contiguous(),
             percentile=99.5,
@@ -774,6 +780,7 @@ class DisneyBRDFPrinciple(nn.Module):
         L_dir: torch.Tensor,
         L_rgb: torch.Tensor,
         irradiance_scale: float = 1.0,
+        mask: Optional[torch.Tensor] = None,  # (1,H,W)
         variant_cls=None,
         sh_coeffs_rgb: Optional[torch.Tensor] = None,  # (K,3) or (B,K,3)
     ) -> torch.Tensor:
@@ -799,12 +806,12 @@ class DisneyBRDFPrinciple(nn.Module):
             "Provide (L_dir, L_rgb) for directional lighting, or sh_coeffs_rgb for SH lighting."
 
         if L_rgb.dim() == 2:
-            return self.render(V, L_dir, L_rgb, irradiance_scale=irradiance_scale, variant_cls=variant_cls)
+            return self.render(V, L_dir, L_rgb, irradiance_scale=irradiance_scale, mask=mask, variant_cls=variant_cls)
         elif L_rgb.dim() == 3:
             outs = []
             assert L_rgb.shape[0] == L_dir.shape[0], f"Expected L_rgb shape (B,N,3) to match L_dir shape (B,N,3), got {L_rgb.shape} and {L_dir.shape}"
             for b in range(L_rgb.shape[0]):
-                outs.append(self.render(V, L_dir[b], L_rgb[b], irradiance_scale=irradiance_scale, variant_cls=variant_cls))
+                outs.append(self.render(V, L_dir[b], L_rgb[b], irradiance_scale=irradiance_scale, mask=mask, variant_cls=variant_cls))
             return torch.stack(outs, dim=0)  # (B,3,H,W)
         else:
             raise ValueError(f"Unexpected L_rgb shape: {L_rgb.shape}")
@@ -894,7 +901,7 @@ class DisneyBRDFPrinciple(nn.Module):
         max_vis: int = 8,
         gamma: Optional[float] = 2.2,
         save_triplets: bool = True,
-        err_gain: float = 4.0,
+        err_gain: float = 1.0,
     ):
         """
         Saves:
@@ -929,6 +936,10 @@ class DisneyBRDFPrinciple(nn.Module):
         tgt = tgt_all.index_select(0, idx)                                     # (vis,3,H,W)
         err = (pred - tgt).abs()
         err_vis = (err * float(err_gain)).clamp(0, 1)
+        
+        # ---- render preds in diffuse/specular shader
+        pred_diffuse = self(V=V, L_dir=L_dir_all.index_select(0, idx), L_rgb=L_rgb_all.index_select(0, idx), variant_cls=DisneyBRDFGreyBall)  # (vis,3,H,W)
+        pred_specular = self(V=V, L_dir=L_dir_all.index_select(0, idx), L_rgb=L_rgb_all.index_select(0, idx), variant_cls=DisneyBRDFChromeBall)  # (vis,3,H,W)
 
         # ---- to uint8 HWC for mosaic
         def to_uint8_hwc(img_chw: torch.Tensor, gamma: Optional[float]) -> torch.Tensor:
@@ -942,10 +953,13 @@ class DisneyBRDFPrinciple(nn.Module):
         for i in range(vis):
             tiles.append(to_uint8_hwc(tgt[i], gamma=gamma))
             tiles.append(to_uint8_hwc(pred[i].clamp(0, 1), gamma=gamma))
-            tiles.append(to_uint8_hwc(err_vis[i], gamma=None))
+            tiles.append(to_uint8_hwc(pred_diffuse[i].clamp(0, 1), gamma=gamma))
+            tiles.append(to_uint8_hwc(pred_specular[i].clamp(0, 1), gamma=gamma))
+            # tiles.append(to_uint8_hwc(err_vis[i], gamma=None))
 
-        mosaic = self._pil_grid(tiles, rows=vis, cols=3)
-        header = f"epoch={epoch:04d}  loss={loss_value:.6f}   rows: tgt | pred | abs(err)*{err_gain:g}"
+        sets_per_row = 4
+        mosaic = self._pil_grid(tiles, rows=vis//sets_per_row, cols=5*sets_per_row)
+        header = f"epoch={epoch:04d}  loss={loss_value:.6f}   rows: tgt | pred | diffuse | specular | abs(err)*{err_gain:g}"
         mosaic = self._pil_add_text(mosaic, header, xy=(10, 10))
 
         mosaics_dir = save_dir / "mosaics"
@@ -962,7 +976,7 @@ class DisneyBRDFPrinciple(nn.Module):
                 self._save_png(to_uint8_hwc(err_vis[j], gamma=None), renders_dir / f"{j:02d}_err.png")
 
     @torch.no_grad()
-    def init_basecolor_from_image(self, base0: torch.Tensor, eps: float = 1e-6):
+    def init_basecolor_from_image(self, base0: torch.Tensor, eps: float = 1e-6, require_grad: bool = True):
         """
         base0: (3,H,W) or (H,W,3), values in [0,1]
         Initializes baseColor_un so that sigmoid(baseColor_un) ~= base0.
@@ -985,6 +999,76 @@ class DisneyBRDFPrinciple(nn.Module):
 
         # write into the *unconstrained* parameter
         self.baseColor_un.copy_(_logit(base_chw, eps=eps))
+        
+        if not require_grad:
+            self.baseColor_un.requires_grad_(False)
+        
+    @torch.no_grad()
+    def init_normal_from_image(
+        self,
+        normal0: torch.Tensor,
+        in_range: str = "auto",   # "auto" | "01" | "m11"
+        eps: float = 1e-6,
+        require_grad: bool = True,
+    ):
+        """
+        normal0: (3,H,W) or (H,W,3)
+          - If in_range == "01": expects normals encoded in [0,1] (common normal map), will map to [-1,1]
+          - If in_range == "m11": expects normals already in [-1,1]
+          - If in_range == "auto": if max<=1 and min>=0 => treat as [0,1], else treat as [-1,1]
+
+        Writes into normal_un such that after _safe_normalize() in _param_maps(),
+        P["normal"] ~= normalized(normal0).
+        """
+        if normal0.dim() != 3:
+            raise ValueError(f"Expected 3D normal map, got {tuple(normal0.shape)}")
+
+        # ---- to CHW ----
+        if normal0.shape[0] == 3:
+            n_chw = normal0
+        elif normal0.shape[-1] == 3:
+            n_chw = normal0.permute(2, 0, 1).contiguous()
+        else:
+            raise ValueError(f"Unrecognized normal layout: {tuple(normal0.shape)}")
+
+        # ---- move/cast ----
+        n_chw = n_chw.to(self.normal_un.device).to(self.normal_un.dtype)
+
+        # ---- range handling ----
+        if in_range == "auto":
+            mn = float(n_chw.amin().item())
+            mx = float(n_chw.amax().item())
+            # typical [0,1] normal maps
+            if mn >= -1e-4 and mx <= 1.0 + 1e-4:
+                in_range = "01"
+            else:
+                in_range = "m11"
+
+        if in_range == "01":
+            n_chw = n_chw * 2.0 - 1.0
+        elif in_range == "m11":
+            pass
+        else:
+            raise ValueError(f"in_range must be one of: auto|01|m11, got '{in_range}'")
+
+        # ---- if model is not per-pixel, collapse to a single normal ----
+        if not self.per_pixel:
+            # average then renormalize
+            n_chw = n_chw.mean(dim=(1, 2), keepdim=True)  # (3,1,1)
+
+        # ---- normalize per-pixel (or single) ----
+        # (3,H,W) -> (H,W,3) normalize -> back to (3,H,W)
+        n_hwc = n_chw.permute(1, 2, 0).contiguous()
+        n_hwc = _safe_normalize(n_hwc, eps=eps)
+        n_chw = n_hwc.permute(2, 0, 1).contiguous()
+
+        # ---- write into unconstrained parameter ----
+        # normal_un is unconstrained; _param_maps() will normalize again, which is fine.
+        self.normal_un.copy_(n_chw)
+        
+        if not require_grad:
+            self.normal_un.requires_grad_(False)
+
 
     @staticmethod
     def _img(p: Path, size=None, label=None, label_size=32):
@@ -1175,6 +1259,28 @@ class DisneyBRDFConstrained(DisneyBRDFPrinciple):
         # IMPORTANT: constrain should return a new dict (or we copy here)
         return self.constrain(dict(super()._param_maps()))
 
+class DisneyBRDFGreyBall(DisneyBRDFConstrained):
+    # surface diffuse only
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        zero3 = torch.zeros_like(P["baseColor"])
+        one3 = torch.ones_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+        one1 = one3[..., 0]
+        
+        # P["normal"] = zero3
+        P["baseColor"] = one3
+        P["metallic"] = zero1
+        P["subsurface"] = zero1
+        P["specular"] = zero1
+        P["roughness"] = one1
+        P["specularTint"] = zero1
+        P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        P["clearcoat"] = zero1
+        P["clearcoatGloss"] = zero1
+        return P
 
 class DisneyBRDFDiffuse(DisneyBRDFConstrained):
     # surface diffuse only
@@ -1210,6 +1316,29 @@ class DisneyBRDFDiffuseSubsurface(DisneyBRDFConstrained):
         # P["subsurface"] = zero1
         P["specular"] = zero1
         # P["roughness"] = zero1
+        P["specularTint"] = zero1
+        P["anisotropic"] = zero1
+        P["sheen"] = zero1
+        P["sheenTint"] = zero1
+        P["clearcoat"] = zero1
+        P["clearcoatGloss"] = zero1
+        return P
+
+class DisneyBRDFChromeBall(DisneyBRDFConstrained):
+    # surface specular only
+    @staticmethod
+    def constrain(P: dict) -> dict:
+        one3 = torch.ones_like(P["baseColor"])
+        one1 = one3[..., 0]
+        zero3 = torch.zeros_like(P["baseColor"])
+        zero1 = zero3[..., 0]
+
+        # P["normal"] = zero3
+        P["baseColor"] = zero3
+        P["metallic"] = one1
+        P["subsurface"] = zero1
+        P["specular"] = one1
+        P["roughness"] = zero1
         P["specularTint"] = zero1
         P["anisotropic"] = zero1
         P["sheen"] = zero1

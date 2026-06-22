@@ -2709,21 +2709,21 @@ def fit_disney_brdf_multi_gpu():
         'lighting_augs': [
             ('fixed_olat1', '1:1:0'),
             
-            ('fixed_hdri_olat346_rot4', '1:0:1'),
+            # ('fixed_hdri_olat346_rot4', '1:0:1'),
             # ('fixed_hdri_olat346_rot36', '1:0:1'), # 36s per light
             # ('fixed_hdri_olat346_rot72', '1:0:1'), # 72s per light
             
-            ('fixed_olat1+hdri_olat346_rot4', '1:1:1'),
+            # ('fixed_olat1+hdri_olat346_rot4', '1:1:1'),
         ],
         'lighting_representations': [
             # 'sh:L1:S346',
-            'sh:L3:S346',
-            'sh:L6:S346',
-            'sh:L6:S692',
+            # 'sh:L3:S346',
+            # 'sh:L6:S346',
+            # 'sh:L6:S692',
             # 'sh:L8:S346',
             # 'sh:L16:S346',
-            'sh:L32:S346',
-            # 'directional',
+            # 'sh:L32:S346',
+            'directional',
         ],
         'datasets': ['lightstage'],
         'irradiance_levels': {
@@ -2743,16 +2743,16 @@ def fit_disney_brdf_multi_gpu():
             # 'specular',
             # 'specular-with-clearcoat',
             # 'simplified',
-            'simplified-multilayer',
-            # 'principle',
+            # 'simplified-multilayer',
+            'principle',
         ],
         
         'polarizations': [
             # 'cross',
-            'parallel',
+            # 'parallel',
             # 'parallel+cross(diffuse)',
             # 'parallel+cross(diffuse+specular)',
-            'parallel+cross(diffuse-with-subsurface)',
+            # 'parallel+cross(diffuse-with-subsurface)',
             'parallel+cross(diffuse-with-subsurface+specular-with-clearcoat)',
         ],
         

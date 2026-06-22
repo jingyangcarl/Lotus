@@ -46,9 +46,10 @@ export TASK_NAME="forward_gbuffer"
 # export TASK_NAME="forward_polarization"
 
 # data augmentation
-export AUG_RATIO="1:1:1"
-# export AUG_TYPE="random1"
-export AUG_TYPE="random_olat1+hdri_olat346"
+# export AUG_RATIO="1:1:1"
+# export AUG_TYPE="random_olat1+hdri_olat346"
+export AUG_RATIO="1:0:1"
+export AUG_TYPE="random_hdri_olat346"
 
 # eval
 export BASE_TEST_DATA_DIR="datasets/eval/"
